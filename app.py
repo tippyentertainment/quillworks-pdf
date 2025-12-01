@@ -166,7 +166,8 @@ def generate_book_pdf():
         story.append(Spacer(1, 12))
         
         for i, chapter in enumerate(book_data.get('chapters', [])):
-            toc_entry = f"{chapter.get('title', f'Chapter {chapter.get('number', i+1)')}"
+            default_title = f"Chapter {chapter.get('number', i+1)}"
+            toc_entry = chapter.get('title', default_title)
             story.append(Paragraph(toc_entry, body_style))
             story.append(Spacer(1, 6))
         
