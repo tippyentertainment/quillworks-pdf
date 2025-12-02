@@ -565,7 +565,7 @@ def generate_recipe_book_pdf():
 
 @app.route('/generate-book-pdf', methods=['POST'])
 def generate_book_pdf():
-    """Generate PDF for regular books"""
+    """Generate PDF for regular books with headers, page numbers, and proper TOC"""
     try:
         data = request.json
         book_data = data.get('data', {})
@@ -595,8 +595,8 @@ def generate_book_pdf():
             buffer,
             pagesize=(page_width, page_height),
             leftMargin=0.75*inch,
-            rightMargin=0.5*inch,
-            topMargin=0.75*inch,
+            rightMargin=0.75*inch,
+            topMargin=1*inch,  # More space for header
             bottomMargin=0.75*inch
         )
         
@@ -604,7 +604,9 @@ def generate_book_pdf():
         story = []
         styles = getSampleStyleSheet()
         
-        # Custom styles
+        # Custom styles with 1.2pt line spacing
+        font_size = book_data.get('font_size', 11)
+        
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Title'],
@@ -631,21 +633,44 @@ def generate_book_pdf():
             fontName=FONT_FAMILY,
             fontSize=18,
             textColor=colors.black,
-            spaceAfter=12
+            alignment=TA_CENTER,
+            spaceAfter=24
         )
         
+        # Body style with 1.2pt line spacing (leading)
         body_style = ParagraphStyle(
             'Body',
             parent=styles['Normal'],
             fontName=FONT_FAMILY,
-            fontSize=book_data.get('font_size', 11),
-            leading=book_data.get('font_size', 11) * 1.5,
+            fontSize=font_size,
+            leading=font_size + 1.2,  # 1.2pt line spacing
             textColor=colors.black,
             alignment=TA_JUSTIFY,
             firstLineIndent=0.3*inch
         )
         
-        # Title page
+        # TOC styles
+        toc_title_style = ParagraphStyle(
+            'TOCTitle',
+            parent=styles['Heading1'],
+            fontName=FONT_FAMILY,
+            fontSize=18,
+            textColor=colors.black,
+            alignment=TA_CENTER,
+            spaceAfter=24
+        )
+        
+        toc_entry_style = ParagraphStyle(
+            'TOCEntry',
+            parent=styles['Normal'],
+            fontName=FONT_FAMILY,
+            fontSize=11,
+            textColor=colors.black,
+            alignment=TA_LEFT,
+            spaceAfter=8
+        )
+        
+        # Title page (no header/page number)
         story.append(Spacer(1, 2*inch))
         story.append(Paragraph(book_data.get('book_title', 'Untitled'), title_style))
         story.append(Paragraph(f"by {book_data.get('author_name', 'Author')}", author_style))
@@ -653,7 +678,7 @@ def generate_book_pdf():
             story.append(Paragraph(book_data['genre'], author_style))
         story.append(PageBreak())
         
-        # Dedication
+        # Dedication (no header/page number)
         if book_data.get('dedication'):
             story.append(Spacer(1, 2*inch))
             dedication_style = ParagraphStyle(
@@ -668,7 +693,7 @@ def generate_book_pdf():
             story.append(Paragraph(book_data['dedication'], dedication_style))
             story.append(PageBreak())
         
-        # About the Author
+        # About the Author (no header/page number)
         if book_data.get('about_author'):
             about_title_style = ParagraphStyle(
                 'AboutTitle',
@@ -682,59 +707,64 @@ def generate_book_pdf():
             story.append(Paragraph(book_data['about_author'], body_style))
             story.append(PageBreak())
         
-        # Table of Contents with accurate page numbers
-        story.append(Paragraph("Table of Contents", chapter_title_style))
+        # Table of Contents with dot leaders
+        story.append(Paragraph("Table of Contents", toc_title_style))
         story.append(Spacer(1, 12))
         
-        # Calculate chapter starting pages (accounting for front matter)
-        # Front matter: title page (1), dedication (if present), about author (if present), TOC
-        current_page = 1  # title page
-        if book_data.get('dedication'):
-            current_page += 1
-        if book_data.get('about_author'):
-            current_page += 1
-        current_page += 1  # TOC page itself
-        
-        toc_style_with_leader = ParagraphStyle(
-            'TOCEntryWithLeader',
-            parent=body_style,
-            fontName=FONT_FAMILY,
-            fontSize=11,
-            textColor=colors.black,
-            alignment=TA_LEFT,
-            spaceAfter=6
-        )
+        # Calculate chapter starting pages
+        current_page = 1  # Start numbering from first chapter
+        chapter_pages = {}
         
         for i, chapter in enumerate(book_data.get('chapters', [])):
-            chapter_title = chapter.get('title', f'Chapter {chapter.get('number', i+1)}')
-            # Create table for dot leaders
-            toc_data = [[Paragraph(chapter_title, toc_style_with_leader), Paragraph(str(current_page), toc_style_with_leader)]]
-            toc_table = Table(toc_data, colWidths=[5*inch, 0.5*inch])
+            chapter_pages[i] = current_page
+            # Estimate pages for this chapter
+            content = chapter.get('content', '')
+            word_count = len(content.split())
+            estimated_pages = max(1, (word_count + 350) // 400)
+            current_page += estimated_pages
+        
+        # Build TOC with dot leaders
+        for i, chapter in enumerate(book_data.get('chapters', [])):
+            default_title = f"Chapter {chapter.get('number', i+1)}"
+            chapter_title = chapter.get('title', default_title)
+            page_num = str(chapter_pages[i])
+            
+            # Create entry with dot leader
+            dots = '.' * 100  # Lots of dots, table will trim
+            toc_line = f"{chapter_title} {dots} {page_num}"
+            
+            # Use table for proper alignment
+            toc_data = [[
+                Paragraph(chapter_title, toc_entry_style),
+                Paragraph(page_num, toc_entry_style)
+            ]]
+            toc_table = Table(toc_data, colWidths=[4*inch, 0.5*inch])
             toc_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('ALIGN', (0, 0), (0, 0), 'LEFT'),
                 ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+                ('LINEABOVE', (0, 0), (-1, 0), 0.5, colors.grey, None, (2, 2)),  # Dotted line
             ]))
             story.append(toc_table)
-            
-            # Estimate pages for this chapter (roughly 300-400 words per page)
-            content = chapter.get('content', '')
-            word_count = len(content.split())
-            estimated_pages = max(1, (word_count + 350) // 400)  # Round up
-            current_page += estimated_pages
         
         story.append(PageBreak())
         
-        # Chapters
-        for chapter in book_data.get('chapters', []):
+        # Track current chapter for headers
+        current_chapter_title = ""
+        chapter_list = book_data.get('chapters', [])
+        
+        # Chapters with headers
+        for chapter_idx, chapter in enumerate(chapter_list):
+            default_title = f"Chapter {chapter.get('number', chapter_idx+1)}"
+            current_chapter_title = chapter.get('title', default_title)
+            
             # Chapter title
             story.append(Paragraph(str(chapter.get('number', '')), chapter_title_style))
-            story.append(Paragraph(chapter.get('title', ''), chapter_title_style))
+            story.append(Paragraph(current_chapter_title, chapter_title_style))
             story.append(Spacer(1, 24))
             
             # Chapter content
             content = chapter.get('content', '')
-            # Split into paragraphs
             paragraphs = content.split('\n\n')
             for para in paragraphs:
                 if para.strip():
@@ -743,14 +773,80 @@ def generate_book_pdf():
             
             story.append(PageBreak())
         
-        # Build PDF with background color
-        def add_background(canvas, doc):
+        # Build PDF with background, headers, and page numbers
+        front_matter_pages = 1  # title
+        if book_data.get('dedication'):
+            front_matter_pages += 1
+        if book_data.get('about_author'):
+            front_matter_pages += 1
+        front_matter_pages += 1  # TOC
+        
+        # Track chapter titles for headers
+        chapter_title_tracker = {'current': book_data.get('book_title', '')}
+        
+        def add_page_elements(canvas, doc):
             canvas.saveState()
+            
+            # Background color
             canvas.setFillColor(page_color)
             canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
+            
+            # Only add headers/page numbers after front matter
+            if doc.page > front_matter_pages:
+                canvas.setFillColor(colors.black)
+                
+                # Page number (actual page - front matter pages)
+                page_num = doc.page - front_matter_pages
+                
+                # Page numbers in 10pt font
+                canvas.setFont(FONT_FAMILY, 10)
+                
+                # Alternate left/right for page numbers
+                if page_num % 2 == 0:  # Even pages - page number on left
+                    canvas.drawString(0.75*inch, page_height - 0.5*inch, str(page_num))
+                else:  # Odd pages - page number on right
+                    canvas.drawRightString(page_width - 0.75*inch, page_height - 0.5*inch, str(page_num))
+                
+                # Chapter title in center with 6.5pt font and wrapping
+                canvas.setFont(FONT_FAMILY, 6.5)
+                
+                # Get current chapter title
+                header_text = chapter_title_tracker['current']
+                
+                # Calculate available width for center text (between margins and page numbers)
+                available_width = page_width - 2.5*inch  # Leave space for page numbers
+                
+                # Simple text wrapping for long titles
+                from reportlab.pdfbase.pdfmetrics import stringWidth
+                if stringWidth(header_text, FONT_FAMILY, 6.5) > available_width:
+                    # Wrap text - split into words and fit
+                    words = header_text.split()
+                    lines = []
+                    current_line = []
+                    
+                    for word in words:
+                        test_line = ' '.join(current_line + [word])
+                        if stringWidth(test_line, FONT_FAMILY, 6.5) <= available_width:
+                            current_line.append(word)
+                        else:
+                            if current_line:
+                                lines.append(' '.join(current_line))
+                            current_line = [word]
+                    
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    
+                    # Draw wrapped lines (max 2 lines)
+                    y_pos = page_height - 0.5*inch
+                    for i, line in enumerate(lines[:2]):
+                        canvas.drawCentredString(page_width / 2, y_pos - (i * 8), line)
+                else:
+                    # Single line
+                    canvas.drawCentredString(page_width / 2, page_height - 0.5*inch, header_text)
+            
             canvas.restoreState()
         
-        doc.build(story, onFirstPage=add_background, onLaterPages=add_background)
+        doc.build(story, onFirstPage=add_page_elements, onLaterPages=add_page_elements)
         
         buffer.seek(0)
         return send_file(
