@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify, send_file
 from reportlab.lib.pagesizes import inch
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, Table, TableStyle, KeepTogether
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -25,6 +25,34 @@ from io import BytesIO
 import requests
 import os
 from datetime import datetime
+
+try:
+    from generate_book_docx import generate_book_docx
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+    print("WARNING: python-docx not available, DOCX generation disabled")
+
+try:
+    from pypdf import PdfReader
+    PDF_EXTRACTION_AVAILABLE = True
+except ImportError:
+    PDF_EXTRACTION_AVAILABLE = False
+    print("WARNING: pypdf not available, PDF text extraction disabled")
+
+try:
+    from html_to_pdf import html_to_pdf, fetch_and_convert_html_to_pdf
+    HTML_TO_PDF_AVAILABLE = True
+except ImportError:
+    HTML_TO_PDF_AVAILABLE = False
+    print("WARNING: HTML to PDF conversion not available")
+
+try:
+    from docx import Document
+    DOCX_EXTRACTION_AVAILABLE = True
+except ImportError:
+    DOCX_EXTRACTION_AVAILABLE = False
+    print("WARNING: python-docx not available for text extraction")
 
 app = Flask(__name__)
 
@@ -40,7 +68,500 @@ except:
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'healthy', 'service': 'pdf-generator'})
+    return jsonify({
+        'status': 'healthy', 
+        'service': 'pdf-generator',
+        'capabilities': {
+            'docx_generation': DOCX_AVAILABLE,
+            'pdf_extraction': PDF_EXTRACTION_AVAILABLE,
+            'docx_extraction': DOCX_EXTRACTION_AVAILABLE,
+            'html_to_pdf': HTML_TO_PDF_AVAILABLE
+        }
+    })
+
+@app.route('/convert-html-to-pdf', methods=['POST'])
+def convert_html_to_pdf():
+    """Convert HTML content or URL to PDF using WeasyPrint"""
+    if not HTML_TO_PDF_AVAILABLE:
+        return jsonify({'error': 'HTML to PDF conversion not available. Install weasyprint.'}), 500
+    
+    try:
+        data = request.json
+        
+        # Check if HTML content is provided directly
+        if 'html' in data:
+            html_content = data['html']
+            base_url = data.get('base_url')
+            pdf_buffer = html_to_pdf(html_content, base_url)
+        
+        # Or fetch from URL
+        elif 'url' in data:
+            html_url = data['url']
+            pdf_buffer = fetch_and_convert_html_to_pdf(html_url)
+        
+        else:
+            return jsonify({'error': 'Either "html" or "url" must be provided'}), 400
+        
+        # Get filename from request or use default
+        filename = data.get('filename', 'document.pdf')
+        
+        return send_file(
+            pdf_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=filename
+        )
+    
+    except Exception as e:
+        return jsonify({'error': f'HTML to PDF conversion failed: {str(e)}'}), 500
+
+@app.route('/extract-text', methods=['POST'])
+def extract_text():
+    """Extract text from PDF or DOCX files"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        filename = file.filename.lower()
+        
+        # Extract text based on file type
+        if filename.endswith('.pdf'):
+            if not PDF_EXTRACTION_AVAILABLE:
+                return jsonify({'error': 'PDF text extraction not available'}), 500
+            
+            try:
+                pdf_reader = PdfReader(file)
+                text_parts = []
+                for page in pdf_reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        text_parts.append(text)
+                
+                extracted_text = '\n\n'.join(text_parts)
+                
+                if not extracted_text.strip():
+                    return jsonify({'error': 'No text could be extracted from the PDF. The file may be image-based or encrypted.'}), 400
+                
+                return jsonify({'text': extracted_text})
+                
+            except Exception as e:
+                return jsonify({'error': f'Failed to extract text from PDF: {str(e)}'}), 500
+        
+        elif filename.endswith('.docx'):
+            if not DOCX_EXTRACTION_AVAILABLE:
+                return jsonify({'error': 'DOCX text extraction not available'}), 500
+            
+            try:
+                doc = Document(file)
+                text_parts = []
+                for paragraph in doc.paragraphs:
+                    if paragraph.text.strip():
+                        text_parts.append(paragraph.text)
+                
+                extracted_text = '\n\n'.join(text_parts)
+                
+                if not extracted_text.strip():
+                    return jsonify({'error': 'No text could be extracted from the DOCX file.'}), 400
+                
+                return jsonify({'text': extracted_text})
+                
+            except Exception as e:
+                return jsonify({'error': f'Failed to extract text from DOCX: {str(e)}'}), 500
+        
+        elif filename.endswith('.txt'):
+            try:
+                text = file.read().decode('utf-8')
+                if not text.strip():
+                    return jsonify({'error': 'The text file is empty.'}), 400
+                return jsonify({'text': text})
+            except Exception as e:
+                return jsonify({'error': f'Failed to read text file: {str(e)}'}), 500
+        
+        else:
+            return jsonify({'error': 'Unsupported file type. Please upload PDF, DOCX, or TXT files.'}), 400
+        
+    except Exception as e:
+        return jsonify({'error': f'Text extraction failed: {str(e)}'}), 500
+
+@app.route('/generate-recipe-book-pdf', methods=['POST'])
+def generate_recipe_book_pdf():
+    """Generate PDF for recipe books with two-page spreads matching the preview"""
+    try:
+        data = request.json
+        recipe_book_data = data.get('data', {})
+        
+        # Create PDF
+        buffer = BytesIO()
+        
+        # 8.5 x 11 inches portrait
+        page_width, page_height = 8.5*inch, 11*inch
+        
+        # Get page color
+        page_color_name = recipe_book_data.get('page_color', 'cream')
+        page_colors = {
+            'white': colors.white,
+            'cream': colors.Color(1, 0.996, 0.941),
+            'off-white': colors.Color(0.973, 0.973, 0.973),
+            'ivory': colors.Color(1, 1, 0.941)
+        }
+        page_color = page_colors.get(page_color_name, page_colors['cream'])
+        
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=(page_width, page_height),
+            leftMargin=0.5*inch,
+            rightMargin=0.5*inch,
+            topMargin=0.5*inch,
+            bottomMargin=0.5*inch
+        )
+        
+        story = []
+        styles = getSampleStyleSheet()
+        
+        # Custom styles matching the preview
+        title_style = ParagraphStyle(
+            'RecipeTitle',
+            parent=styles['Title'],
+            fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica-Bold',
+            fontSize=16,
+            textColor=colors.black,
+            alignment=TA_CENTER,
+            spaceAfter=12
+        )
+        
+        heading_style = ParagraphStyle(
+            'RecipeHeading',
+            parent=styles['Heading2'],
+            fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica-Bold',
+            fontSize=12,
+            textColor=colors.black,
+            spaceAfter=8,
+            spaceBefore=0
+        )
+        
+        did_you_know_heading = ParagraphStyle(
+            'DidYouKnowHeading',
+            parent=styles['Heading2'],
+            fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica-Bold',
+            fontSize=12,
+            textColor=colors.HexColor('#9a3412'),
+            spaceAfter=8,
+            spaceBefore=0
+        )
+        
+        body_style = ParagraphStyle(
+            'RecipeBody',
+            parent=styles['Normal'],
+            fontName='Georgia',
+            fontSize=9,
+            leading=13.5,
+            textColor=colors.HexColor('#333333'),
+            alignment=TA_LEFT
+        )
+        
+        recipe_name_footer = ParagraphStyle(
+            'RecipeNameFooter',
+            parent=styles['Normal'],
+            fontName='Georgia',
+            fontSize=8,
+            textColor=colors.HexColor('#666666'),
+            alignment=TA_CENTER
+        )
+        
+        recipe_header_title = ParagraphStyle(
+            'RecipeHeaderTitle',
+            parent=styles['Normal'],
+            fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica-Bold',
+            fontSize=14,
+            textColor=colors.black,
+            alignment=TA_CENTER,
+            spaceAfter=4
+        )
+        
+        recipe_header_details = ParagraphStyle(
+            'RecipeHeaderDetails',
+            parent=styles['Normal'],
+            fontName='Georgia',
+            fontSize=9,
+            textColor=colors.HexColor('#666666'),
+            alignment=TA_CENTER,
+            spaceAfter=12
+        )
+        
+        # Title page
+        story.append(Spacer(1, 2*inch))
+        story.append(Paragraph(recipe_book_data.get('book_title', 'Recipe Book'), title_style))
+        if recipe_book_data.get('subheading'):
+            subheading_style = ParagraphStyle(
+                'Subheading',
+                parent=body_style,
+                fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica',
+                fontSize=14,
+                fontStyle='italic',
+                alignment=TA_CENTER
+            )
+            story.append(Paragraph(recipe_book_data['subheading'], subheading_style))
+        story.append(Spacer(1, 0.5*inch))
+        author_style = ParagraphStyle(
+            'Author',
+            parent=body_style,
+            fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica',
+            fontSize=14,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(f"by {recipe_book_data.get('author_name', 'Author')}", author_style))
+        story.append(PageBreak())
+        
+        # Dedication page if present
+        if recipe_book_data.get('dedication'):
+            story.append(Spacer(1, 2*inch))
+            dedication_style = ParagraphStyle(
+                'Dedication',
+                parent=body_style,
+                fontName='Georgia',
+                fontSize=12,
+                textColor=colors.HexColor('#333333'),
+                alignment=TA_CENTER,
+                fontStyle='italic'
+            )
+            story.append(Paragraph(recipe_book_data['dedication'], dedication_style))
+            story.append(PageBreak())
+        
+        # Table of Contents
+        if recipe_book_data.get('recipes') and len(recipe_book_data.get('recipes', [])) > 0:
+            story.append(Spacer(1, 1*inch))
+            toc_title_style = ParagraphStyle(
+                'TOCTitle',
+                parent=styles['Heading1'],
+                fontName='Inter' if 'Inter' in [f.name for f in pdfmetrics.getRegisteredFontNames()] else 'Helvetica-Bold',
+                fontSize=16,
+                textColor=colors.black,
+                alignment=TA_CENTER,
+                spaceAfter=20
+            )
+            story.append(Paragraph("Table of Contents", toc_title_style))
+            
+            toc_style = ParagraphStyle(
+                'TOCEntry',
+                parent=body_style,
+                fontName='Georgia',
+                fontSize=12,
+                textColor=colors.HexColor('#333333'),
+                alignment=TA_LEFT,
+                spaceAfter=4
+            )
+            
+            for idx, recipe in enumerate(recipe_book_data.get('recipes', [])):
+                recipe_name = recipe.get('name', f'Recipe {idx + 1}')
+                story.append(Paragraph(recipe_name, toc_style))
+                if idx < len(recipe_book_data.get('recipes', [])) - 1:
+                    story.append(Spacer(1, 2))
+            
+            story.append(PageBreak())
+        
+        # Track page numbers
+        page_number = 1
+        
+        # Recipes as two-page spreads
+        for recipe_idx, recipe in enumerate(recipe_book_data.get('recipes', [])):
+            # LEFT PAGE - Image and History
+            left_page_elements = []
+            
+            # Recipe image if available - adjusted for 8.5x11 portrait
+            # Note: Image already contains recipe name, so no header needed
+            if recipe.get('image_url'):
+                try:
+                    img_url = recipe['image_url']
+                    if img_url.startswith('http'):
+                        img_response = requests.get(img_url, timeout=10)
+                        img_buffer = BytesIO(img_response.content)
+                        # Image for portrait layout - maintain aspect ratio, slightly smaller to fit better
+                        img = Image(img_buffer, width=7.5*inch, height=5.5*inch)
+                        left_page_elements.append(img)
+                        left_page_elements.append(Spacer(1, 4))
+                except Exception as e:
+                    print(f"Failed to load recipe image: {e}")
+            
+            # History section with "Did you know" heading
+            if recipe.get('history'):
+                left_page_elements.append(Paragraph("Did you know", did_you_know_heading))
+                left_page_elements.append(Paragraph(recipe['history'], body_style))
+            
+            # Add left page elements
+            for element in left_page_elements:
+                story.append(element)
+            
+            # Force page break to start right page
+            story.append(PageBreak())
+            
+            # RIGHT PAGE - Ingredients and Directions  
+            right_page_elements = []
+            
+            # Add header with recipe title and details
+            right_page_elements.append(Paragraph(f"<b>{recipe.get('name', 'Untitled Recipe')}</b>", recipe_header_title))
+            
+            # Create header details line
+            header_parts = []
+            if recipe.get('cooking_time'):
+                header_parts.append(recipe['cooking_time'])
+            if recipe.get('servings'):
+                header_parts.append(f"{recipe['servings']} servings")
+            
+            if header_parts:
+                header_details = '               '.join(header_parts)
+                right_page_elements.append(Paragraph(header_details, recipe_header_details))
+            else:
+                right_page_elements.append(Spacer(1, 16))
+            
+            # Ingredients in 2 columns
+            if recipe.get('ingredients'):
+                right_page_elements.append(Paragraph("Ingredients", heading_style))
+                ingredients = recipe['ingredients']
+                if isinstance(ingredients, list):
+                    # Create 2-column table for ingredients
+                    ingredient_list = [ing.strip() for ing in ingredients if ing.strip()]
+                    # Split into two columns
+                    mid_point = (len(ingredient_list) + 1) // 2
+                    col1 = ingredient_list[:mid_point]
+                    col2 = ingredient_list[mid_point:]
+                    
+                    # Pad the shorter column
+                    while len(col1) < len(col2):
+                        col1.append('')
+                    while len(col2) < len(col1):
+                        col2.append('')
+                    
+                    # Create table data
+                    table_data = []
+                    for i in range(len(col1)):
+                        row = [
+                            Paragraph(f"• {col1[i]}" if col1[i] else '', body_style),
+                            Paragraph(f"• {col2[i]}" if col2[i] else '', body_style)
+                        ]
+                        table_data.append(row)
+                    
+                    # Create table
+                    ingredients_table = Table(table_data, colWidths=[3.5*inch, 3.5*inch])
+                    ingredients_table.setStyle(TableStyle([
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+                        ('TOPPADDING', (0, 0), (-1, -1), 2),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                    ]))
+                    right_page_elements.append(ingredients_table)
+                    right_page_elements.append(Spacer(1, 6))
+            
+            # Preparation Steps
+            raw_prep_steps = recipe.get('preparation_steps', '')
+            if raw_prep_steps:
+                right_page_elements.append(Paragraph("Preparation Steps", heading_style))
+                # Split by newlines first
+                lines = [s.strip() for s in raw_prep_steps.split('\n') if s.strip()]
+                # Then flatten by splitting on commas to match preview behavior
+                all_steps = []
+                for line in lines:
+                    individual_steps = [s.strip() for s in line.split(',') if s.strip()]
+                    all_steps.extend(individual_steps)
+                
+                # Create 2-column table for preparation steps to match preview
+                mid_point = (len(all_steps) + 1) // 2
+                col1_steps = all_steps[:mid_point]
+                col2_steps = all_steps[mid_point:]
+                
+                # Pad the shorter column
+                while len(col1_steps) < len(col2_steps):
+                    col1_steps.append('')
+                while len(col2_steps) < len(col1_steps):
+                    col2_steps.append('')
+                
+                # Create table data
+                table_data = []
+                step_counter = 0
+                for i in range(len(col1_steps)):
+                    row = []
+                    if col1_steps[i]:
+                        step_counter += 1
+                        step_text = col1_steps[i].lstrip('0123456789. ')
+                        row.append(Paragraph(f"<b>{step_counter}.</b> {step_text}", body_style))
+                    else:
+                        row.append(Paragraph('', body_style))
+                    
+                    if col2_steps[i]:
+                        step_counter += 1
+                        step_text = col2_steps[i].lstrip('0123456789. ')
+                        row.append(Paragraph(f"<b>{step_counter}.</b> {step_text}", body_style))
+                    else:
+                        row.append(Paragraph('', body_style))
+                    
+                    table_data.append(row)
+                
+                # Create table
+                prep_steps_table = Table(table_data, colWidths=[3.5*inch, 3.5*inch])
+                prep_steps_table.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+                    ('TOPPADDING', (0, 0), (-1, -1), 2),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                ]))
+                right_page_elements.append(prep_steps_table)
+                right_page_elements.append(Spacer(1, 6))
+            
+            # Cooking Directions
+            raw_cooking_directions = recipe.get('cooking_directions', '')
+            if raw_cooking_directions:
+                right_page_elements.append(Paragraph("Cooking Directions", heading_style))
+                # Split by newlines first
+                lines = [s.strip() for s in raw_cooking_directions.split('\n') if s.strip()]
+                # Then flatten by splitting on commas to match preview behavior
+                all_steps = []
+                for line in lines:
+                    individual_steps = [s.strip() for s in line.split(',') if s.strip()]
+                    all_steps.extend(individual_steps)
+                
+                for step_num, step_text in enumerate(all_steps, 1):
+                    # Remove any existing numbering
+                    step_text = step_text.lstrip('0123456789. ')
+                    right_page_elements.append(Paragraph(f"{step_num}. {step_text}", body_style))
+                    right_page_elements.append(Spacer(1, 2))
+                right_page_elements.append(Spacer(1, 3))
+            
+            # Special Instructions
+            if recipe.get('special_instructions'):
+                right_page_elements.append(Paragraph("Special Instructions", heading_style))
+                right_page_elements.append(Paragraph(recipe['special_instructions'], body_style))
+            
+            # Add right page elements
+            for element in right_page_elements:
+                story.append(element)
+            
+            # No empty pages needed - each recipe naturally takes 2 pages (left + right)
+            # Next recipe will start on next left page automatically
+        
+        # Build PDF with background color
+        def add_background(canvas, doc):
+            canvas.saveState()
+            canvas.setFillColor(page_color)
+            canvas.rect(0, 0, page_width, page_height, fill=1, stroke=0)
+            canvas.restoreState()
+        
+        doc.build(story, onFirstPage=add_background, onLaterPages=add_background)
+        
+        buffer.seek(0)
+        return send_file(
+            buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"{recipe_book_data.get('book_title', 'recipe_book').replace(' ', '_')}.pdf"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/generate-book-pdf', methods=['POST'])
 def generate_book_pdf():
@@ -161,15 +682,46 @@ def generate_book_pdf():
             story.append(Paragraph(book_data['about_author'], body_style))
             story.append(PageBreak())
         
-        # Table of Contents
+        # Table of Contents with accurate page numbers
         story.append(Paragraph("Table of Contents", chapter_title_style))
         story.append(Spacer(1, 12))
         
+        # Calculate chapter starting pages (accounting for front matter)
+        # Front matter: title page (1), dedication (if present), about author (if present), TOC
+        current_page = 1  # title page
+        if book_data.get('dedication'):
+            current_page += 1
+        if book_data.get('about_author'):
+            current_page += 1
+        current_page += 1  # TOC page itself
+        
+        toc_style_with_leader = ParagraphStyle(
+            'TOCEntryWithLeader',
+            parent=body_style,
+            fontName=FONT_FAMILY,
+            fontSize=11,
+            textColor=colors.black,
+            alignment=TA_LEFT,
+            spaceAfter=6
+        )
+        
         for i, chapter in enumerate(book_data.get('chapters', [])):
-            default_title = f"Chapter {chapter.get('number', i+1)}"
-            toc_entry = chapter.get('title', default_title)
-            story.append(Paragraph(toc_entry, body_style))
-            story.append(Spacer(1, 6))
+            chapter_title = chapter.get('title', f'Chapter {chapter.get('number', i+1)}')
+            # Create table for dot leaders
+            toc_data = [[Paragraph(chapter_title, toc_style_with_leader), Paragraph(str(current_page), toc_style_with_leader)]]
+            toc_table = Table(toc_data, colWidths=[5*inch, 0.5*inch])
+            toc_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+                ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+            ]))
+            story.append(toc_table)
+            
+            # Estimate pages for this chapter (roughly 300-400 words per page)
+            content = chapter.get('content', '')
+            word_count = len(content.split())
+            estimated_pages = max(1, (word_count + 350) // 400)  # Round up
+            current_page += estimated_pages
         
         story.append(PageBreak())
         
@@ -320,6 +872,207 @@ def generate_childrens_book_pdf():
             mimetype='application/pdf',
             as_attachment=True,
             download_name=f"{book_data.get('title', 'book').replace(' ', '_')}.pdf"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/generate-greeting-card-pdf', methods=['POST'])
+def generate_greeting_card_pdf():
+    """Generate PDF for greeting cards with two-page fold layout"""
+    try:
+        data = request.json
+        card_data = data.get('data', {})
+        
+        # Create PDF
+        buffer = BytesIO()
+        
+        # 10 x 7 inches landscape (folds to 5x7)
+        page_width, page_height = 10*inch, 7*inch
+        
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=(page_width, page_height),
+            leftMargin=0,
+            rightMargin=0,
+            topMargin=0,
+            bottomMargin=0
+        )
+        
+        story = []
+        styles = getSampleStyleSheet()
+        
+        # Get image URLs
+        front_art_url = None
+        inside_icon_url = None
+        for brief in card_data.get('image_briefs', []):
+            if brief['id'] == 'FRONT_ART':
+                front_art_url = brief.get('image_url')
+            elif brief['id'] == 'INSIDE_ICON':
+                inside_icon_url = brief.get('image_url')
+        
+        # === PAGE 1: OUTSIDE (Back | Front) ===
+        # Left panel: BACK
+        back_logo = card_data.get('back', {}).get('logo_text', 'QuillWorks.AI')
+        back_footer = card_data.get('back', {}).get('footer_line', 'Crafted with care')
+        
+        back_style = ParagraphStyle(
+            'BackStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#999999'),
+        )
+        
+        back_para = Paragraph(f"<b>{back_logo}</b><br/><br/><font size='8'>{back_footer}</font>", back_style)
+        
+        # Right panel: FRONT
+        front_headline = card_data.get('front', {}).get('headline', '')
+        front_subline = card_data.get('front', {}).get('subline', '')
+        
+        front_elements = []
+        
+        # Add front art if available
+        if front_art_url and front_art_url.startswith('http'):
+            try:
+                img_response = requests.get(front_art_url, timeout=10)
+                img_buffer = BytesIO(img_response.content)
+                front_img = Image(img_buffer, width=4.5*inch, height=5*inch)
+                front_elements.append(front_img)
+            except Exception as e:
+                print(f"Failed to load front art: {e}")
+        
+        front_elements.append(Spacer(1, 0.3*inch))
+        
+        # Front text
+        front_title_style = ParagraphStyle(
+            'FrontTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#2c3e50'),
+            spaceAfter=6,
+        )
+        
+        front_sub_style = ParagraphStyle(
+            'FrontSub',
+            parent=styles['Normal'],
+            fontSize=14,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#34495e'),
+            fontStyle='italic',
+        )
+        
+        front_elements.append(Paragraph(f"<b>{front_headline}</b>", front_title_style))
+        if front_subline:
+            front_elements.append(Paragraph(front_subline, front_sub_style))
+        
+        # Create table for outside
+        outside_data = [[back_para, front_elements]]
+        outside_table = Table(outside_data, colWidths=[5*inch, 5*inch], rowHeights=[7*inch])
+        outside_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('BACKGROUND', (0, 0), (0, 0), colors.HexColor('#f8f9fa')),
+            ('BACKGROUND', (1, 0), (1, 0), colors.white),
+            ('LEFTPADDING', (0, 0), (-1, -1), 20),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 20),
+        ]))
+        
+        story.append(outside_table)
+        story.append(PageBreak())
+        
+        # === PAGE 2: INSIDE (Left | Right) ===
+        # Left panel: INSIDE_LEFT (quote/verse)
+        inside_left_msg = card_data.get('inside_left', {}).get('message', '')
+        
+        quote_style = ParagraphStyle(
+            'QuoteStyle',
+            parent=styles['Normal'],
+            fontSize=11,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#7f8c8d'),
+            fontStyle='italic',
+            leading=16,
+        )
+        
+        left_para = Paragraph(inside_left_msg, quote_style) if inside_left_msg else Spacer(1, 1*inch)
+        
+        # Right panel: INSIDE_RIGHT (main message)
+        inside_right_msg = card_data.get('inside_right', {}).get('message', '')
+        
+        right_elements = []
+        
+        # Add decorative icon if available
+        if inside_icon_url and inside_icon_url.startswith('http'):
+            try:
+                img_response = requests.get(inside_icon_url, timeout=10)
+                img_buffer = BytesIO(img_response.content)
+                icon_img = Image(img_buffer, width=1*inch, height=1*inch)
+                right_elements.append(icon_img)
+                right_elements.append(Spacer(1, 0.2*inch))
+            except Exception as e:
+                print(f"Failed to load inside icon: {e}")
+        
+        message_style = ParagraphStyle(
+            'MessageStyle',
+            parent=styles['Normal'],
+            fontSize=12,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor('#2c3e50'),
+            leading=18,
+        )
+        
+        right_elements.append(Paragraph(inside_right_msg, message_style))
+        
+        # Create table for inside
+        inside_data = [[left_para, right_elements]]
+        inside_table = Table(inside_data, colWidths=[5*inch, 5*inch], rowHeights=[7*inch])
+        inside_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
+            ('LEFTPADDING', (0, 0), (-1, -1), 30),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 30),
+        ]))
+        
+        story.append(inside_table)
+        
+        # Build PDF
+        doc.build(story)
+        
+        buffer.seek(0)
+        return send_file(
+            buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"{card_data.get('occasion', 'greeting_card').replace(' ', '_')}.pdf"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/generate-book-docx', methods=['POST'])
+def generate_book_docx_endpoint():
+    """Generate DOCX for regular books"""
+    if not DOCX_AVAILABLE:
+        return jsonify({'error': 'DOCX generation not available'}), 500
+    
+    try:
+        data = request.json
+        book_data = data.get('data', {})
+        
+        # Generate DOCX
+        docx_bytes = generate_book_docx(book_data)
+        
+        buffer = BytesIO(docx_bytes)
+        buffer.seek(0)
+        
+        return send_file(
+            buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=f"{book_data.get('book_title', 'book').replace(' ', '_')}.docx"
         )
         
     except Exception as e:
