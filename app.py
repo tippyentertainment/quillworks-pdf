@@ -1174,6 +1174,51 @@ def generate_book_docx_endpoint():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# --- Remove Background Endpoint ---
+from PIL import Image as PILImage
+import base64
+import io
+
+@app.route('/remove-background', methods=['POST'])
+def remove_background():
+    """Remove background from an image given by URL or data URL (base64). Returns PNG with transparent background."""
+    try:
+        data = request.get_json(force=True)
+        image_url = data.get('image_url')
+        if not image_url:
+            return jsonify({'error': 'Missing image_url'}), 400
+
+        # Handle data URL (base64)
+        if image_url.startswith('data:image'):
+            header, encoded = image_url.split(',', 1)
+            image_bytes = base64.b64decode(encoded)
+            image = PILImage.open(io.BytesIO(image_bytes)).convert('RGBA')
+        else:
+            # Assume direct URL
+            resp = requests.get(image_url)
+            if resp.status_code != 200:
+                return jsonify({'error': 'Failed to fetch image from URL'}), 400
+            image = PILImage.open(io.BytesIO(resp.content)).convert('RGBA')
+
+        # Simple background removal: make all white pixels transparent
+        datas = image.getdata()
+        newData = []
+        for item in datas:
+            # Detect white-ish pixels
+            if item[0] > 240 and item[1] > 240 and item[2] > 240:
+                newData.append((255, 255, 255, 0))
+            else:
+                newData.append(item)
+        image.putdata(newData)
+
+        output = io.BytesIO()
+        image.save(output, format='PNG')
+        output.seek(0)
+        return send_file(output, mimetype='image/png', as_attachment=True, download_name='result.png')
+    except Exception as e:
+        return jsonify({'error': f'Background removal failed: {str(e)}'}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
