@@ -7,13 +7,14 @@ from flask import jsonify
 from io import BytesIO
 import requests
 
-try:
-    from weasyprint import HTML, CSS
-    from weasyprint.text.fonts import FontConfiguration
-    WEASYPRINT_AVAILABLE = True
-except ImportError:
-    WEASYPRINT_AVAILABLE = False
-    print("WARNING: WeasyPrint not available, HTML-to-PDF conversion disabled")
+# Don't import WeasyPrint at module import time: its Python package
+# depends on native shared libraries (gobject, pango, cairo, etc.)
+# which may not be present in the runtime image and will raise
+# OSError via cffi.dlopen. Defer imports to runtime when a conversion
+# is requested so the application can boot even when those libs are
+# missing.
+WEASYPRINT_AVAILABLE = False
+
 
 
 def html_to_pdf(html_content, base_url=None):
