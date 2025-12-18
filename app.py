@@ -1,9 +1,10 @@
 """
+"""
 Simple PDF Generation Service for QuillWorks.AI
 Deploy this on Railway, Render, Fly.io, or any Python hosting platform.
 
 Install dependencies:
-pip install flask reportlab pillow requests python-dotenv
+pip install flask weasyprint python-dotenv
 
 Run locally:
 python app.py
@@ -13,18 +14,8 @@ web: gunicorn app:app
 """
 
 from flask import Flask, request, jsonify, send_file
-from reportlab.lib.pagesizes import inch
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, Table, TableStyle, KeepTogether
-from reportlab.lib import colors
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.units import inch
 from io import BytesIO
-import requests
 import os
-from datetime import datetime
 
 try:
     from generate_book_docx import generate_book_docx
@@ -54,17 +45,65 @@ except ImportError:
     DOCX_EXTRACTION_AVAILABLE = False
     print("WARNING: python-docx not available for text extraction")
 
+try:
+    from generate_flyer_pdf import generate_flyer_pdf
+    from overlay_logo import overlay_logo_on_image, download_image
+    FLYER_PDF_AVAILABLE = True
+except ImportError:
+    FLYER_PDF_AVAILABLE = False
+    print("WARNING: Flyer PDF generation not available")
+
+try:
+    from text_overlay import add_text_overlay_to_image
+    TEXT_OVERLAY_AVAILABLE = True
+except ImportError:
+    TEXT_OVERLAY_AVAILABLE = False
+    print("WARNING: Text overlay not available")
+
+try:
+    from rembg import remove
+    REMBG_AVAILABLE = True
+except ImportError:
+    REMBG_AVAILABLE = False
+    print("WARNING: rembg not available")
+
+try:
+    from generate_epub import build_epub
+    EPUB_AVAILABLE = True
+except ImportError:
+    EPUB_AVAILABLE = False
+    print("WARNING: EPUB generation not available")
+
+try:
+    from design_service import (
+        generate_nano_banana_design,
+        upscale_with_esrgan,
+        build_prompt,
+        write_candidate_files,
+        list_candidates,
+        mark_selected,
+        apply_to_project,
+        BASE_DIR,
+    )
+    # Check if ATLASCLOUD_API_KEY is set
+    if os.environ.get("ATLASCLOUD_API_KEY"):
+        DESIGN_SERVICE_AVAILABLE = True
+    else:
+        DESIGN_SERVICE_AVAILABLE = False
+        print("WARNING: Design service module loaded but ATLASCLOUD_API_KEY not set")
+except ImportError as e:
+    DESIGN_SERVICE_AVAILABLE = False
+    print(f"WARNING: Design service not available: {e}")
+
 app = Flask(__name__)
 
-# Register fonts
-try:
-    pdfmetrics.registerFont(TTFont('Bembo', 'fonts/Bembo.ttf'))
-    pdfmetrics.registerFont(TTFont('Bembo-Italic', 'fonts/Bembo-Italic.ttf'))
-    pdfmetrics.registerFont(TTFont('Bembo-Bold', 'fonts/Bembo-Bold.ttf'))
-    FONT_FAMILY = 'Bembo'
-except:
-    # Fallback to built-in fonts
-    FONT_FAMILY = 'Times-Roman'
+# Add CORS headers for design service endpoints
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -75,9 +114,450 @@ def health():
             'docx_generation': DOCX_AVAILABLE,
             'pdf_extraction': PDF_EXTRACTION_AVAILABLE,
             'docx_extraction': DOCX_EXTRACTION_AVAILABLE,
-            'html_to_pdf': HTML_TO_PDF_AVAILABLE
+            'html_to_pdf': HTML_TO_PDF_AVAILABLE,
+            'flyer_pdf': FLYER_PDF_AVAILABLE,
+            'text_overlay': TEXT_OVERLAY_AVAILABLE,
+            'rembg': REMBG_AVAILABLE,
+            'epub_generation': EPUB_AVAILABLE,
+            'design_service': DESIGN_SERVICE_AVAILABLE
         }
     })
+@app.route('/designs/generate', methods=['POST', 'OPTIONS'])
+def generate_design():
+    """Generate a new design theme."""
+    if not DESIGN_SERVICE_AVAILABLE:
+        return jsonify({'error': 'Design service not available'}), 500
+    
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.json
+        industry = data.get('industry', 'technology')
+        prompt_override = data.get('prompt_override')
+        
+        prompt = build_prompt(industry, prompt_override)
+        base_img = generate_nano_banana_design(prompt)
+        hi_img = upscale_with_esrgan(base_img, scale=2)
+        
+        import uuid
+        theme_id = str(uuid.uuid4())
+        version = 1
+        
+        manifest = write_candidate_files(theme_id, version, hi_img, industry, prompt)
+        
+        return jsonify({
+            'themeId': theme_id,
+            'version': version,
+            'previewPng': manifest['master_png'],
+            'manifest': manifest,
+        })
+    except Exception as e:
+        print(f"Error generating design: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/designs/list', methods=['GET', 'OPTIONS'])
+def list_designs():
+    """List all generated design candidates."""
+    if not DESIGN_SERVICE_AVAILABLE:
+        return jsonify({'error': 'Design service not available', 'items': []}), 500
+    
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        items = list_candidates()
+        return jsonify({'items': items})
+    except Exception as e:
+        print(f"Error listing designs: {str(e)}")
+        return jsonify({'error': str(e), 'items': []}), 500
+
+
+@app.route('/designs/preview', methods=['GET', 'OPTIONS'])
+def get_preview_image():
+    """Serve preview images from the designs storage directory."""
+    if not DESIGN_SERVICE_AVAILABLE:
+        return jsonify({'error': 'Design service not available'}), 500
+    
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        path = request.args.get('path')
+        if not path:
+            return jsonify({'error': 'Path parameter required'}), 400
+        
+        # Security: ensure path is within BASE_DIR
+        full_path = BASE_DIR / path
+        if not str(full_path.resolve()).startswith(str(BASE_DIR.resolve())):
+            return jsonify({'error': 'Invalid path'}), 403
+        
+        if not full_path.exists():
+            return jsonify({'error': 'Preview image not found'}), 404
+        
+        return send_file(full_path, mimetype='image/png')
+    except Exception as e:
+        print(f"Error serving preview: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/designs/select', methods=['POST', 'OPTIONS'])
+def select_design():
+    """Select and apply a design to the project."""
+    if not DESIGN_SERVICE_AVAILABLE:
+        return jsonify({'error': 'Design service not available'}), 500
+    
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.json
+        theme_id = data.get('theme_id')
+        version = data.get('version')
+        
+        if not theme_id or version is None:
+            return jsonify({'error': 'theme_id and version required'}), 400
+        
+        mark_selected(theme_id, version)
+        applied = apply_to_project(theme_id, version)
+        
+        return jsonify({
+            'ok': True,
+            'applied': applied
+        })
+    except Exception as e:
+        print(f"Error selecting design: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/convert-html-to-pdf', methods=['POST'])
+def convert_html_to_pdf():
+    """Convert HTML content or URL to PDF using WeasyPrint"""
+    if not HTML_TO_PDF_AVAILABLE:
+        return jsonify({'error': 'HTML to PDF conversion not available. Install weasyprint.'}), 500
+    
+    try:
+        data = request.json
+        
+        # Check if HTML content is provided directly
+        if 'html' in data:
+            html_content = data['html']
+            base_url = data.get('base_url')
+            pdf_buffer = html_to_pdf(html_content, base_url)
+        
+        # Or fetch from URL
+        elif 'url' in data:
+            html_url = data['url']
+            pdf_buffer = fetch_and_convert_html_to_pdf(html_url)
+        
+        else:
+            return jsonify({'error': 'Either "html" or "url" must be provided'}), 400
+        
+        # Get filename from request or use default
+        filename = data.get('filename', 'document.pdf')
+        
+        return send_file(
+            pdf_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=filename
+        )
+    
+    except Exception as e:
+        return jsonify({'error': f'HTML to PDF conversion failed: {str(e)}'}), 500
+
+@app.route('/extract-text', methods=['POST'])
+def extract_text():
+    """Extract text from PDF or DOCX files"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        filename = file.filename.lower()
+        
+        # Extract text based on file type
+        if filename.endswith('.pdf'):
+            if not PDF_EXTRACTION_AVAILABLE:
+                return jsonify({'error': 'PDF text extraction not available'}), 500
+            
+            try:
+                pdf_reader = PdfReader(file)
+                text_parts = []
+                for page in pdf_reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        text_parts.append(text)
+                
+                extracted_text = '\n\n'.join(text_parts)
+                
+                if not extracted_text.strip():
+                    return jsonify({'error': 'No text could be extracted from the PDF. The file may be image-based or encrypted.'}), 400
+                
+                return jsonify({'text': extracted_text})
+                
+            except Exception as e:
+                return jsonify({'error': f'Failed to extract text from PDF: {str(e)}'}), 500
+        
+        elif filename.endswith('.docx'):
+            if not DOCX_EXTRACTION_AVAILABLE:
+                return jsonify({'error': 'DOCX text extraction not available'}), 500
+            
+            try:
+                doc = Document(file)
+                text_parts = []
+                for paragraph in doc.paragraphs:
+                    if paragraph.text.strip():
+                        text_parts.append(paragraph.text)
+                
+                extracted_text = '\n\n'.join(text_parts)
+                
+                if not extracted_text.strip():
+                    return jsonify({'error': 'No text could be extracted from the DOCX file.'}), 400
+                
+                return jsonify({'text': extracted_text})
+                
+            except Exception as e:
+                return jsonify({'error': f'Failed to extract text from DOCX: {str(e)}'}), 500
+        
+        elif filename.endswith('.txt'):
+            try:
+                text = file.read().decode('utf-8')
+                if not text.strip():
+                    return jsonify({'error': 'The text file is empty.'}), 400
+                return jsonify({'text': text})
+            except Exception as e:
+                return jsonify({'error': f'Failed to read text file: {str(e)}'}), 500
+        
+        else:
+            return jsonify({'error': 'Unsupported file type. Please upload PDF, DOCX, or TXT files.'}), 400
+        
+    except Exception as e:
+        return jsonify({'error': f'Text extraction failed: {str(e)}'}), 500
+
+@app.route('/generate-book-docx', methods=['POST'])
+def generate_book_docx_endpoint():
+    """Generate DOCX for regular books"""
+    if not DOCX_AVAILABLE:
+        return jsonify({'error': 'DOCX generation not available'}), 500
+    
+    try:
+        data = request.json
+        book_data = data.get('data', {})
+        
+        # Generate DOCX
+        docx_bytes = generate_book_docx(book_data)
+        
+        buffer = BytesIO(docx_bytes)
+        buffer.seek(0)
+        
+        return send_file(
+            buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=f"{book_data.get('book_title', 'book').replace(' ', '_')}.docx"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/generate-flyer-pdf', methods=['POST'])
+def generate_flyer_pdf_endpoint():
+    """Generate PDF for flyers"""
+    if not FLYER_PDF_AVAILABLE:
+        return jsonify({'error': 'Flyer PDF generation not available'}), 500
+    
+    try:
+        data = request.json
+        flyer_data = data.get('data', {})
+        
+        # Generate PDF
+        pdf_buffer = generate_flyer_pdf(flyer_data)
+        
+        return send_file(
+            pdf_buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"{flyer_data.get('service', 'flyer').replace(' ', '_')}_flyer.pdf"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/overlay-logo', methods=['POST'])
+def overlay_logo_endpoint():
+    """Overlay a logo image onto a base image at the specified position."""
+    try:
+        data = request.json
+        base_image_url = data.get('base_image_url')
+        logo_image_url = data.get('logo_image_url')
+        position = data.get('position', 'top-left')
+        
+        if not base_image_url:
+            return jsonify({'error': 'base_image_url is required'}), 400
+        if not logo_image_url:
+            return jsonify({'error': 'logo_image_url is required'}), 400
+        
+        print(f"Overlaying logo at {position}")
+        print(f"Base image: {base_image_url}")
+        print(f"Logo: {logo_image_url}")
+        
+        # Download images
+        base_image_bytes = download_image(base_image_url)
+        logo_image_bytes = download_image(logo_image_url)
+        
+        # Overlay logo
+        result_bytes = overlay_logo_on_image(base_image_bytes, logo_image_bytes, position)
+        
+        # Return the composited image
+        buffer = BytesIO(result_bytes)
+        buffer.seek(0)
+        return send_file(buffer, mimetype='image/png')
+    except Exception as e:
+        print(f"Error overlaying logo: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/add-text-overlay', methods=['POST'])
+def add_text_overlay_endpoint():
+    """Add title and author text overlay to a book cover image."""
+    if not TEXT_OVERLAY_AVAILABLE:
+        return jsonify({'error': 'Text overlay not available'}), 500
+    
+    try:
+        data = request.json
+        base_image_url = data.get('base_image_url')
+        title = data.get('title')
+        author = data.get('author')
+        
+        if not base_image_url:
+            return jsonify({'error': 'base_image_url is required'}), 400
+        if not title:
+            return jsonify({'error': 'title is required'}), 400
+        
+        print(f"Adding text overlay to cover")
+        print(f"Base image: {base_image_url}")
+        print(f"Title: {title}")
+        print(f"Author: {author}")
+        
+        # Download base image
+        base_image_bytes = download_image(base_image_url)
+        
+        # Add text overlay
+        result_bytes = add_text_overlay_to_image(base_image_bytes, title, author)
+        
+        # Return the image with text overlay
+        buffer = BytesIO(result_bytes)
+        buffer.seek(0)
+        return send_file(buffer, mimetype='image/png')
+    except Exception as e:
+        print(f"Error adding text overlay: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/remove-background', methods=['POST'])
+def remove_background():
+    """Remove background from an image using rembg"""
+    if not REMBG_AVAILABLE:
+        return jsonify({'error': 'rembg not available. Install rembg package.'}), 500
+    
+    try:
+        data = request.json
+        image_url = data.get('image_url')
+        
+        if not image_url:
+            return jsonify({'error': 'image_url is required'}), 400
+        
+        print(f"Removing background from: {image_url}")
+        
+        # Download image
+        image_bytes = download_image(image_url)
+        
+        # Remove background using rembg
+        input_buffer = BytesIO(image_bytes)
+        output_buffer = BytesIO()
+        
+        output_buffer.write(remove(input_buffer.read()))
+        output_buffer.seek(0)
+        
+        print(f"Background removed successfully")
+        
+        # Return the image with transparent background
+        return send_file(output_buffer, mimetype='image/png')
+    except Exception as e:
+        print(f"Error removing background: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/generate-epub', methods=['POST'])
+def generate_epub_endpoint():
+    """Generate EPUB from interior and cover PDFs"""
+    if not EPUB_AVAILABLE:
+        return jsonify({'error': 'EPUB generation not available. Install ebooklib, pdfplumber, and pdf2image.'}), 500
+    
+    try:
+        data = request.json
+        interior_pdf_url = data.get('interior_pdf_url')
+        title = data.get('title')
+        author = data.get('author')
+        cover_pdf_url = data.get('cover_pdf_url')
+        description = data.get('description')
+        language = data.get('language', 'en')
+        
+        if not interior_pdf_url:
+            return jsonify({'error': 'interior_pdf_url is required'}), 400
+        if not title:
+            return jsonify({'error': 'title is required'}), 400
+        if not author:
+            return jsonify({'error': 'author is required'}), 400
+        
+        print(f"[EPUB] Generating EPUB for: {title} by {author}")
+        print(f"[EPUB] Interior PDF: {interior_pdf_url}")
+        if cover_pdf_url:
+            print(f"[EPUB] Cover PDF: {cover_pdf_url}")
+        
+        # Generate EPUB
+        epub_bytes = build_epub(
+            interior_pdf_url=interior_pdf_url,
+            title=title,
+            author=author,
+            cover_pdf_url=cover_pdf_url,
+            description=description,
+            language=language
+        )
+        
+        # Return EPUB file
+        buffer = BytesIO(epub_bytes)
+        buffer.seek(0)
+        
+        filename = f"{title.replace(' ', '_')}.epub"
+        
+        return send_file(
+            buffer,
+            mimetype='application/epub+zip',
+            as_attachment=True,
+            download_name=filename
+        )
+    
+    except Exception as e:
+        print(f"Error generating EPUB: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 @app.route('/convert-html-to-pdf', methods=['POST'])
 def convert_html_to_pdf():
