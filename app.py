@@ -134,17 +134,17 @@ def generate_design():
         data = request.json
         industry = data.get('industry', 'technology')
         prompt_override = data.get('prompt_override')
-        
+
         prompt = build_prompt(industry, prompt_override)
         base_img = generate_nano_banana_design(prompt)
         hi_img = upscale_with_esrgan(base_img, scale=2)
-        
+
         import uuid
         theme_id = str(uuid.uuid4())
         version = 1
-        
+
         manifest = write_candidate_files(theme_id, version, hi_img, industry, prompt)
-        
+
         return jsonify({
             'themeId': theme_id,
             'version': version,
@@ -152,10 +152,17 @@ def generate_design():
             'manifest': manifest,
         })
     except Exception as e:
-        print(f"Error generating design: {str(e)}")
+        error_msg = str(e) or "Unknown error occurred"
+        print(f"Error generating design: {error_msg}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        # Return a more user-friendly error message
+        if "ATLASCLOUD_API_KEY" in error_msg:
+            return jsonify({'error': 'Design service API key not configured'}), 500
+        elif "timeout" in error_msg.lower():
+            return jsonify({'error': 'Design generation timed out. Please try again.'}), 504
+        else:
+            return jsonify({'error': f'Design generation failed: {error_msg}'}), 500
 
 
 @app.route('/designs/list', methods=['GET', 'OPTIONS'])
