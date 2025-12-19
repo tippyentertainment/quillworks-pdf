@@ -558,42 +558,6 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-@app.route('/convert-html-to-pdf', methods=['POST'])
-def convert_html_to_pdf():
-    """Convert HTML content or URL to PDF using WeasyPrint"""
-    if not HTML_TO_PDF_AVAILABLE:
-        return jsonify({'error': 'HTML to PDF conversion not available. Install weasyprint.'}), 500
-    
-    try:
-        data = request.json
-        
-        # Check if HTML content is provided directly
-        if 'html' in data:
-            html_content = data['html']
-            base_url = data.get('base_url')
-            pdf_buffer = html_to_pdf(html_content, base_url)
-        
-        # Or fetch from URL
-        elif 'url' in data:
-            html_url = data['url']
-            pdf_buffer = fetch_and_convert_html_to_pdf(html_url)
-        
-        else:
-            return jsonify({'error': 'Either "html" or "url" must be provided'}), 400
-        
-        # Get filename from request or use default
-        filename = data.get('filename', 'document.pdf')
-        
-        return send_file(
-            pdf_buffer,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=filename
-        )
-    
-    except Exception as e:
-        return jsonify({'error': f'HTML to PDF conversion failed: {str(e)}'}), 500
-
 @app.route('/extract-text', methods=['POST'])
 def extract_text():
     """Extract text from PDF or DOCX files"""
