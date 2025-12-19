@@ -45,49 +45,81 @@ def atlas_generate_image(model: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Thin wrapper around AtlasCloud image API.
     """
+    if not ATLASCLOUD_API_KEY:
+        raise Exception("ATLASCLOUD_API_KEY is not set")
     url = f"https://api.atlascloud.ai/api/v1/model/{model}/generateImage"
     headers = {
         "Authorization": f"Bearer {ATLASCLOUD_API_KEY}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    if resp.status_code >= 400:
-        error_text = resp.text
-        raise Exception(f"AtlasCloud error: {error_text}")
-    return resp.json()
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        if resp.status_code >= 400:
+            error_text = resp.text or f"HTTP {resp.status_code}"
+            try:
+                error_json = resp.json()
+                error_text = error_json.get("error") or error_json.get("message") or error_text
+            except:
+                pass
+            raise Exception(f"AtlasCloud API error (status {resp.status_code}): {error_text}")
+        response_data = resp.json()
+        if not response_data:
+            raise Exception("AtlasCloud API returned empty response")
+        return response_data
+    except requests.exceptions.Timeout:
+        raise Exception("AtlasCloud API request timed out after 120 seconds")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"AtlasCloud API request failed: {str(e)}")
 
 
 def poll_for_image(prediction_id: str, max_attempts: int = 30) -> Dict[str, Any]:
     """
     Poll AtlasCloud for image completion.
     """
+    if not ATLASCLOUD_API_KEY:
+        raise Exception("ATLASCLOUD_API_KEY is not set")
     poll_url = f"https://api.atlascloud.ai/api/v1/model/prediction/{prediction_id}"
     headers = {
         "Authorization": f"Bearer {ATLASCLOUD_API_KEY}",
     }
-    
     import time
     for attempt in range(max_attempts):
         if attempt > 0:
             time.sleep(3)
-        
-        resp = requests.get(poll_url, headers=headers, timeout=30)
-        if resp.status_code >= 400:
+        try:
+            resp = requests.get(poll_url, headers=headers, timeout=30)
+            if resp.status_code >= 400:
+                if attempt == max_attempts - 1:
+                    error_text = resp.text or f"HTTP {resp.status_code}"
+                    raise Exception(f"AtlasCloud polling failed (status {resp.status_code}): {error_text}")
+                continue
+            data = resp.json()
+            if not data:
+                if attempt == max_attempts - 1:
+                    raise Exception("AtlasCloud polling returned empty response")
+                continue
+            status = data.get("data", {}).get("status") or data.get("status")
+            if status == "completed":
+                outputs = data.get("data", {}).get("outputs") or data.get("outputs") or data.get("output")
+                if outputs and len(outputs) > 0:
+                    image_url = outputs[0] if isinstance(outputs, list) else outputs
+                    if image_url:
+                        return {"image_url": image_url}
+                    else:
+                        if attempt == max_attempts - 1:
+                            raise Exception("AtlasCloud returned completed status but no image URL")
+            if status == "failed" or status == "error":
+                error_msg = data.get("data", {}).get("error") or data.get("error") or "Image generation failed"
+                raise Exception(f"Generation failed: {error_msg}")
+        except requests.exceptions.Timeout:
+            if attempt == max_attempts - 1:
+                raise Exception("AtlasCloud polling timed out")
             continue
-        
-        data = resp.json()
-        status = data.get("data", {}).get("status") or data.get("status")
-        
-        if status == "completed":
-            outputs = data.get("data", {}).get("outputs") or data.get("outputs") or data.get("output")
-            if outputs and len(outputs) > 0:
-                return {"image_url": outputs[0] if isinstance(outputs, list) else outputs}
-        
-        if status == "failed" or status == "error":
-            error_msg = data.get("data", {}).get("error") or data.get("error") or "Image generation failed"
-            raise Exception(f"Generation failed: {error_msg}")
-    
-    raise Exception("Image generation timed out")
+        except requests.exceptions.RequestException as e:
+            if attempt == max_attempts - 1:
+                raise Exception(f"AtlasCloud polling request failed: {str(e)}")
+            continue
+    raise Exception(f"Image generation timed out after {max_attempts} attempts")
 
 
 def generate_nano_banana_design(prompt: str, width=1920, height=1080) -> Image.Image:
