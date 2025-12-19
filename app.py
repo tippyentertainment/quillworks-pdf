@@ -341,31 +341,6 @@ def extract_text():
     except Exception as e:
         return jsonify({'error': f'Text extraction failed: {str(e)}'}), 500
 
-@app.route('/generate-book-docx', methods=['POST'])
-def generate_book_docx_endpoint():
-    """Generate DOCX for regular books"""
-    if not DOCX_AVAILABLE:
-        return jsonify({'error': 'DOCX generation not available'}), 500
-    
-    try:
-        data = request.json
-        book_data = data.get('data', {})
-        
-        # Generate DOCX
-        docx_bytes = generate_book_docx(book_data)
-        
-        buffer = BytesIO(docx_bytes)
-        buffer.seek(0)
-        
-        return send_file(
-            buffer,
-            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            as_attachment=True,
-            download_name=f"{book_data.get('book_title', 'book').replace(' ', '_')}.docx"
-        )
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/generate-flyer-pdf', methods=['POST'])
 def generate_flyer_pdf_endpoint():
