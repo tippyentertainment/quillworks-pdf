@@ -1,5 +1,4 @@
 """
-"""
 Simple PDF Generation Service for QuillWorks.AI
 Deploy this on Railway, Render, Fly.io, or any Python hosting platform.
 
