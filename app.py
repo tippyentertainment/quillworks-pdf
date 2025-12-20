@@ -1623,14 +1623,6 @@ def deploy_pages():
         
         print(f"[Pages] Wrote {len(files)} files")
         
-        # Create _redirects file for Cloudflare Pages (for client-side routing)
-        # This is needed for SPA routing to work correctly
-        redirects_path = os.path.join(temp_dir, "_redirects")
-        if not os.path.exists(redirects_path):
-            with open(redirects_path, 'w') as f:
-                f.write("/*    /index.html   200\n")
-            print(f"[Pages] ✅ Created _redirects file for client-side routing")
-        
         # Set environment variables for Wrangler
         env = os.environ.copy()
         env["CLOUDFLARE_API_TOKEN"] = os.environ.get("CLOUDFLARE_API_TOKEN") or cf_api_token
@@ -1638,9 +1630,23 @@ def deploy_pages():
         if cf_zone_id or os.environ.get("CLOUDFLARE_ZONE_ID"):
             env["CLOUDFLARE_ZONE_ID"] = os.environ.get("CLOUDFLARE_ZONE_ID") or cf_zone_id
         
+        # Create wrangler.toml file for Wrangler CLI authentication
+        # This prevents Wrangler from trying to use interactive authentication
+        wrangler_toml_path = os.path.join(temp_dir, "wrangler.toml")
+        with open(wrangler_toml_path, 'w') as f:
+            f.write(f"""# Wrangler configuration for Cloudflare Pages deployment
+# This file is auto-generated for deployment
+
+account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
+
+# Pages projects don't need a name in wrangler.toml, but account_id is required
+""")
+        print(f"[Pages] ✅ Created wrangler.toml with account_id for authentication")
+        
         # Detect framework and build
         package_json_path = os.path.join(temp_dir, "package.json")
         output_dir = "dist"
+        is_react_app = False
         
         if os.path.exists(package_json_path):
             with open(package_json_path) as f:
@@ -1665,6 +1671,32 @@ def deploy_pages():
                 output_dir = "out"  # Next.js static export
             elif "vite" in deps or "react" in deps:
                 output_dir = "dist"
+                is_react_app = True
+            
+            # Create _redirects file for React/Vite apps (for client-side routing)
+            # For Vite, put it in public/ so it gets copied to build output
+            if is_react_app:
+                # Check if _redirects already exists in files
+                has_redirects = any(f.get('path', '').endswith('_redirects') or 
+                                   f.get('path', '').endswith('public/_redirects') for f in files)
+                
+                if not has_redirects:
+                    # Create _redirects file in public folder (Vite/CRA standard)
+                    public_dir = os.path.join(temp_dir, "public")
+                    os.makedirs(public_dir, exist_ok=True)
+                    redirects_path = os.path.join(public_dir, "_redirects")
+                    
+                    # Cloudflare Pages redirect rule: all routes -> index.html with 200 status
+                    with open(redirects_path, 'w', encoding='utf-8') as f:
+                        f.write("/*    /index.html   200\n")
+                    print(f"[Pages] ✅ Created _redirects file in public/ for client-side routing")
+            else:
+                # For non-React apps, create in root
+                redirects_path = os.path.join(temp_dir, "_redirects")
+                if not os.path.exists(redirects_path):
+                    with open(redirects_path, 'w', encoding='utf-8') as f:
+                        f.write("/*    /index.html   200\n")
+                    print(f"[Pages] ✅ Created _redirects file for client-side routing")
             
             # Install dependencies
             print(f"[Pages] Running npm install...")
@@ -1677,11 +1709,24 @@ def deploy_pages():
                 timeout=300  # 5 min timeout
             )
             if result.returncode != 0:
-                print(f"[Pages] npm install failed: {result.stderr}")
-                return jsonify({'error': f'npm install failed: {result.stderr[:500]}'}), 500
+                error_output = result.stderr or result.stdout or "No error output available"
+                print(f"[Pages] npm install failed with return code: {result.returncode}")
+                print(f"[Pages] npm install stderr: {result.stderr[:1000] if result.stderr else '(empty)'}")
+                print(f"[Pages] npm install stdout: {result.stdout[:1000] if result.stdout else '(empty)'}")
+                return jsonify({
+                    'error': f'npm install failed: {error_output[:500]}',
+                    'details': {
+                        'exit_code': result.returncode,
+                        'stderr': result.stderr[:1000] if result.stderr else None,
+                        'stdout': result.stdout[:1000] if result.stdout else None
+                    }
+                }), 500
             
             # Run build
-            print(f"[Pages] Running npm run build...")
+            print(f"[Pages] Running npm run build in {temp_dir}...", flush=True)
+            print(f"[Pages] Working directory contents: {os.listdir(temp_dir)[:10]}", flush=True)
+            print(f"[Pages] Build script: {pkg['scripts'].get('build', 'N/A')}", flush=True)  # Log the actual script
+            
             result = subprocess.run(
                 ["npm", "run", "build"],
                 cwd=temp_dir,
@@ -1692,17 +1737,20 @@ def deploy_pages():
             )
             if result.returncode != 0:
                 error_output = result.stderr or result.stdout or "No error output available"
-                print(f"[Pages] Build failed (exit code {result.returncode})")
-                print(f"[Pages] Build stderr: {result.stderr[:1000] if result.stderr else '(empty)'}")
-                print(f"[Pages] Build stdout: {result.stdout[:1000] if result.stdout else '(empty)'}")
+                print(f"[Pages] Build failed (exit code {result.returncode})", flush=True)
+                print(f"[Pages] Build stderr: {result.stderr[:1000] if result.stderr else '(empty)'}", flush=True)
+                print(f"[Pages] Build stdout: {result.stdout[:1000] if result.stdout else '(empty)'}", flush=True)
                 return jsonify({
                     'error': f'Build failed: {error_output[:500]}',
                     'details': {
                         'exit_code': result.returncode,
                         'stderr': result.stderr[:1000] if result.stderr else None,
                         'stdout': result.stdout[:1000] if result.stdout else None
-                    }
+                    },
+                    'build_script': pkg['scripts'].get('build', 'N/A')
                 }), 500
+            else:
+                print(f"[Pages] ✅ Build completed successfully", flush=True)
         
         # Check if output directory exists
         build_path = os.path.join(temp_dir, output_dir)
@@ -1716,22 +1764,71 @@ def deploy_pages():
             print(f"[Pages] ✅ Build output found at: {build_path}")
             print(f"[Pages] Build output contents: {os.listdir(build_path)[:10]}")
         
+        # Ensure _redirects file is in build output for React/Vite apps
+        if is_react_app:
+            redirects_in_build = os.path.join(build_path, "_redirects")
+            redirects_in_public = os.path.join(temp_dir, "public", "_redirects")
+            
+            # Copy _redirects to build output if it doesn't exist there
+            if not os.path.exists(redirects_in_build):
+                if os.path.exists(redirects_in_public):
+                    shutil.copy2(redirects_in_public, redirects_in_build)
+                    print(f"[Pages] ✅ Copied _redirects from public/ to build output")
+                else:
+                    # Create it directly in build output as fallback
+                    with open(redirects_in_build, 'w', encoding='utf-8') as f:
+                        f.write("/*    /index.html   200\n")
+                    print(f"[Pages] ✅ Created _redirects in build output")
+            else:
+                print(f"[Pages] ✅ _redirects file found in build output")
+        
         # Create the Pages project first (if it doesn't exist)
         print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
-        result = subprocess.run(
-            [
-                "npx", "wrangler", "pages", "project", "create", project_name,
-                "--production-branch", "main"
-            ],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=120
-        )
-        # Ignore error if project already exists
-        if result.returncode != 0 and "already exists" not in result.stderr.lower():
-            print(f"[Pages] Project creation output: {result.stderr}")
+        max_project_retries = 3
+        project_creation_success = False
+        
+        for attempt in range(max_project_retries):
+            if attempt > 0:
+                print(f"[Pages] Retry attempt {attempt + 1}/{max_project_retries} for project creation after 5s delay...")
+                import time
+                time.sleep(5)
+            
+            result = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "project", "create", project_name,
+                    "--production-branch", "main",
+                    "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
+                project_creation_success = True
+                break
+            elif "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
+                print(f"[Pages] Cloudflare Pages project already exists: {project_name} (that's OK)")
+                project_creation_success = True
+                break
+            else:
+                error_output = result.stderr or result.stdout or "No error output available"
+                print(f"[Pages] Project creation attempt {attempt + 1} failed: {error_output[:500]}")
+                if attempt == max_project_retries - 1:
+                    return jsonify({
+                        'error': f'Failed to create Cloudflare Pages project after {max_project_retries} attempts: {error_output[:500]}',
+                        'details': {
+                            'exit_code': result.returncode,
+                            'stderr': result.stderr[:1000] if result.stderr else None,
+                            'stdout': result.stdout[:1000] if result.stdout else None
+                        }
+                    }), 500
+        
+        if not project_creation_success:
+            return jsonify({'error': 'Failed to create Cloudflare Pages project before deployment'}), 500
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
         print(f"[Pages] Deploying to Cloudflare Pages: {project_name}")
@@ -1750,7 +1847,8 @@ def deploy_pages():
                     "npx", "wrangler", "pages", "deploy", build_path,
                     "--project-name", project_name,
                     "--branch", "main",
-                    "--commit-dirty=true"
+                    "--commit-dirty=true",
+                    "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
                 ],
                 cwd=temp_dir,
                 capture_output=True,
@@ -1849,7 +1947,8 @@ def deploy_pages():
                 domain_result = subprocess.run(
                     [
                         "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
-                        "--project-name", project_name
+                        "--project-name", project_name,
+                        "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
                     ],
                     cwd=wrangler_cwd,
                     capture_output=True,
