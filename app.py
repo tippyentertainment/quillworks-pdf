@@ -15,6 +15,10 @@ web: gunicorn app:app
 from flask import Flask, request, jsonify, send_file
 from io import BytesIO
 import os
+import json
+import shutil
+import tempfile
+import subprocess
 
 try:
     from generate_book_docx import generate_book_docx
@@ -118,7 +122,8 @@ def health():
             'text_overlay': TEXT_OVERLAY_AVAILABLE,
             'rembg': REMBG_AVAILABLE,
             'epub_generation': EPUB_AVAILABLE,
-            'design_service': DESIGN_SERVICE_AVAILABLE
+            'design_service': DESIGN_SERVICE_AVAILABLE,
+            'pages_deploy': True
         }
     })
 @app.route('/designs/generate', methods=['POST', 'OPTIONS'])
@@ -1529,6 +1534,141 @@ def generate_book_docx_endpoint():
 
 
 # --- Remove Background Endpoint ---
+
+
+@app.route('/deploy-pages', methods=['POST'])
+def deploy_pages():
+    """
+    Build and deploy a project to Cloudflare Pages using Wrangler CLI.
+    """
+    temp_dir = None
+    try:
+        data = request.json
+        project_name = data.get('project_name')
+        subdomain = data.get('subdomain')
+        files = data.get('files', [])
+        cf_account_id = data.get('cf_account_id')
+        cf_api_token = data.get('cf_api_token')
+        cf_zone_id = data.get('cf_zone_id')
+        
+        if not project_name or not subdomain or not files or not cf_account_id or not cf_api_token:
+            return jsonify({'error': 'Missing required fields: project_name, subdomain, files, cf_account_id, cf_api_token'}), 400
+        
+        # Create temp directory for project files
+        temp_dir = tempfile.mkdtemp(prefix=f"pages-{project_name}-")
+        print(f"[Pages] Created temp dir: {temp_dir}")
+        
+        # Write all files to temp directory
+        for file in files:
+            file_path = os.path.join(temp_dir, file.get('path', ''))
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(file.get('content', ''))
+        
+        print(f"[Pages] Wrote {len(files)} files")
+        
+        # Set environment variables for Wrangler
+        env = os.environ.copy()
+        env["CLOUDFLARE_API_TOKEN"] = cf_api_token
+        env["CLOUDFLARE_ACCOUNT_ID"] = cf_account_id
+        
+        # Detect framework and build
+        package_json_path = os.path.join(temp_dir, "package.json")
+        output_dir = "dist"
+        
+        if os.path.exists(package_json_path):
+            with open(package_json_path) as f:
+                pkg = json.load(f)
+            
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            
+            # Detect output directory
+            if "next" in deps:
+                output_dir = "out"  # Next.js static export
+            elif "vite" in deps or "react" in deps:
+                output_dir = "dist"
+            
+            # Install dependencies
+            print(f"[Pages] Running npm install...")
+            result = subprocess.run(
+                ["npm", "install", "--legacy-peer-deps"],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=300  # 5 min timeout
+            )
+            if result.returncode != 0:
+                print(f"[Pages] npm install failed: {result.stderr}")
+                return jsonify({'error': f'npm install failed: {result.stderr[:500]}'}), 500
+            
+            # Run build
+            print(f"[Pages] Running npm run build...")
+            result = subprocess.run(
+                ["npm", "run", "build"],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=300
+            )
+            if result.returncode != 0:
+                print(f"[Pages] Build failed: {result.stderr}")
+                return jsonify({'error': f'Build failed: {result.stderr[:500]}'}), 500
+        
+        # Check if output directory exists
+        build_path = os.path.join(temp_dir, output_dir)
+        if not os.path.exists(build_path):
+            # Fall back to current directory if build output doesn't exist
+            build_path = temp_dir
+            print(f"[Pages] No {output_dir} directory, using project root")
+        
+        # Deploy to Cloudflare Pages using Wrangler
+        print(f"[Pages] Deploying to Cloudflare Pages: {project_name}")
+        result = subprocess.run(
+            [
+                "npx", "wrangler", "pages", "deploy", build_path,
+                "--project-name", project_name,
+                "--branch", "main",
+                "--commit-dirty=true"
+            ],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=300
+        )
+        
+        if result.returncode != 0:
+            print(f"[Pages] Wrangler deploy failed: {result.stderr}")
+            return jsonify({'error': f'Wrangler deploy failed: {result.stderr[:500]}'}), 500
+        
+        # Parse deployment URL from output
+        deployment_url = None
+        for line in result.stdout.split('\n'):
+            if 'https://' in line and '.pages.dev' in line:
+                deployment_url = line.strip()
+                break
+        
+        print(f"[Pages] ✅ Deployed successfully: {deployment_url}")
+        
+        return jsonify({
+            "success": True,
+            "url": deployment_url,
+            "project_name": project_name,
+            "custom_domain": f"{subdomain}.quillworks.org"
+        })
+        
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Build/deploy timed out'}), 504
+    except Exception as e:
+        print(f"[Pages] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        # Cleanup temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
