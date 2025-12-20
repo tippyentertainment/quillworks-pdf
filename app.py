@@ -1752,7 +1752,7 @@ def deploy_pages():
             # Install dependencies
             print(f"[Pages] Running npm install...")
             result = subprocess.run(
-                ["npm", "install", "--legacy-peer-deps"],
+                ["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund", "--prefer-offline"],
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
@@ -1871,7 +1871,7 @@ def deploy_pages():
                                 # Install all missing packages (including ones that might be in package.json but not installed)
                                 print(f"[Pages] Installing missing packages: {missing_packages}", flush=True)
                                 install_result = subprocess.run(
-                                    ["npm", "install", "--legacy-peer-deps"] + missing_packages,
+                                    ["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund", "--prefer-offline"] + missing_packages,
                                     cwd=temp_dir,
                                     capture_output=True,
                                     text=True,
