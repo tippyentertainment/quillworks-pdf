@@ -1876,7 +1876,7 @@ def deploy_pages():
                                     capture_output=True,
                                     text=True,
                                     env=env,
-                                    timeout=180
+                                    timeout=300  # 5 minutes for npm install (large packages can take time)
                                 )
                                 if install_result.returncode == 0:
                                     print(f"[Pages] ✅ Installed missing packages: {', '.join(missing_packages)}", flush=True)

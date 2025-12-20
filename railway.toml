@@ -3,6 +3,6 @@ builder = "DOCKERFILE"
 dockerfilePath = "./Dockerfile"
 
 [deploy]
-startCommand = "gunicorn app:app --bind 0.0.0.0:8080 --timeout 120 --preload"
+startCommand = "gunicorn app:app --bind 0.0.0.0:8080 --timeout 600 --preload"
 healthcheckPath = "/health"
-healthcheckTimeout = 120
+healthcheckTimeout = 600
