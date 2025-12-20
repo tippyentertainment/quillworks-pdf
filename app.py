@@ -1559,9 +1559,14 @@ def deploy_pages():
         cf_account_id = data.get('cf_account_id')
         cf_api_token = data.get('cf_api_token')
         cf_zone_id = data.get('cf_zone_id')
+        custom_domain = data.get('custom_domain')  # Allow custom domain to be passed in
         
         if not project_name or not subdomain or not files:
             return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
+        
+        # If custom_domain not provided, construct it from subdomain
+        if not custom_domain:
+            custom_domain = f"{subdomain}.quillworks.org"
         
         # Check for Cloudflare credentials (from request or environment)
         has_api_token = cf_api_token or os.environ.get("CLOUDFLARE_API_TOKEN")
@@ -1687,7 +1692,6 @@ def deploy_pages():
         print(f"[Pages] ✅ Deployed successfully: {deployment_url}", flush=True)
         
         # Add custom domain to the Pages project using wrangler CLI
-        custom_domain = f"{subdomain}.quillworks.org"
         print(f"[Pages] Adding custom domain: {custom_domain}", flush=True)
         
         try:
@@ -1757,7 +1761,7 @@ def deploy_pages():
             "success": True,
             "url": deployment_url,
             "project_name": project_name,
-            "custom_domain": f"{subdomain}.quillworks.org"
+            "custom_domain": custom_domain
         })
         
     except subprocess.TimeoutExpired:
