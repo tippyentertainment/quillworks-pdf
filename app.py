@@ -2219,51 +2219,69 @@ def deploy_pages():
             
             domain_attached = False
             
-            print(f"[Pages] Running: wrangler pages domain add {custom_domain} --project-name {project_name}")
-            domain_result = subprocess.run(
-                [
-                    "npx", "--yes", "wrangler@latest", "pages", "domain", "add",
-                    custom_domain,
-                    "--project-name", project_name
-                ],
-                cwd=wrangler_cwd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=90
-            )
+            # Use Cloudflare API directly for domain attachment (more reliable than Wrangler CLI)
+            print(f"[Pages] Attaching custom domain via Cloudflare API: {custom_domain}")
+            print(f"[Pages] Project name: {project_name}")
             
-            if domain_result.returncode == 0:
-                print(f"[Pages] ✅ Custom domain added via Wrangler: {custom_domain}")
-                domain_attached = True
+            # Get the project ID first
+            project_id = None
+            if project_exists:
+                try:
+                    # List projects to get the project ID
+                    list_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}/pages/projects"
+                    list_headers = {
+                        "Authorization": f"Bearer {cf_api_token or os.environ.get('CLOUDFLARE_API_TOKEN')}",
+                        "Content-Type": "application/json"
+                    }
+                    list_response = requests.get(list_url, headers=list_headers, timeout=30)
+                    if list_response.status_code == 200:
+                        projects_data = list_response.json()
+                        for proj in projects_data.get("result", []):
+                            if proj.get("name") == project_name:
+                                project_id = proj.get("id")
+                                print(f"[Pages] ✅ Found project ID: {project_id}")
+                                break
+                except Exception as api_err:
+                    print(f"[Pages] ⚠️ Could not get project ID via API: {api_err}")
+            
+            # Attach domain using Cloudflare API
+            if project_id:
+                try:
+                    attach_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}/pages/projects/{project_name}/domains"
+                    attach_headers = {
+                        "Authorization": f"Bearer {cf_api_token or os.environ.get('CLOUDFLARE_API_TOKEN')}",
+                        "Content-Type": "application/json"
+                    }
+                    attach_data = {
+                        "domain": custom_domain
+                    }
+                    
+                    attach_response = requests.post(attach_url, headers=attach_headers, json=attach_data, timeout=90)
+                    
+                    if attach_response.status_code in [200, 201]:
+                        print(f"[Pages] ✅ Custom domain attached via Cloudflare API: {custom_domain}")
+                        domain_attached = True
+                    elif attach_response.status_code == 409:
+                        # Domain already exists - this is success
+                        print(f"[Pages] ✅ Custom domain already attached (that's OK)")
+                        domain_attached = True
+                    else:
+                        error_data = attach_response.json() if attach_response.content else {}
+                        error_msg = error_data.get("errors", [{}])[0].get("message", attach_response.text)
+                        error_code = error_data.get("errors", [{}])[0].get("code", attach_response.status_code)
+                        
+                        print(f"[Pages] ⚠️ API domain attachment failed: {error_code} - {error_msg}")
+                        
+                        # Check for Error 1014
+                        if "1014" in str(error_code) or "cname" in error_msg.lower():
+                            print(f"[Pages] ❌ Error 1014: CNAME Cross-User Banned")
+                            print(f"[Pages] Troubleshooting: Check DNS records and ensure project exists in account")
+                except Exception as attach_err:
+                    print(f"[Pages] ⚠️ Exception during API domain attachment: {attach_err}")
             else:
-                error_output = (domain_result.stderr or domain_result.stdout or "")
-                error_output_lower = error_output.lower()
-                
-                # Check for "already exists" - this is success
-                if any(phrase in error_output_lower for phrase in ["already", "already exists", "already configured"]):
-                    print(f"[Pages] ✅ Custom domain already attached (that's OK)")
-                    domain_attached = True
-                # Check for Cloudflare Error 1014: CNAME Cross-User Banned
-                elif "1014" in error_output or "cname cross-user banned" in error_output_lower or "cross-user" in error_output_lower:
-                    print(f"[Pages] ❌ Error 1014: CNAME Cross-User Banned")
-                    print(f"[Pages] This error occurs when:")
-                    print(f"[Pages]   1. The DNS CNAME record conflicts with an existing record")
-                    print(f"[Pages]   2. The Pages project doesn't exist in the current Cloudflare account")
-                    print(f"[Pages]   3. There's a DNS record pointing to a different account's resource")
-                    if not project_exists:
-                        print(f"[Pages] ⚠️ CRITICAL: Pages project '{project_name}' was NOT found in your account!")
-                        print(f"[Pages] ⚠️ This is likely the root cause of Error 1014.")
-                    print(f"[Pages] Troubleshooting steps:")
-                    print(f"[Pages]   1. Verify the Pages project '{project_name}' exists in your Cloudflare account")
-                    print(f"[Pages]   2. Check Cloudflare DNS for existing CNAME records for {custom_domain}")
-                    print(f"[Pages]   3. Remove any conflicting DNS records in Cloudflare Dashboard")
-                    print(f"[Pages]   4. Wait a few minutes for DNS to propagate, then try again")
-                    print(f"[Pages]   5. Or manually add the domain in Cloudflare Dashboard:")
-                    print(f"[Pages]      https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
-                    print(f"[Pages] Full error: {error_output[:1000]}")
-                else:
-                    print(f"[Pages] ⚠️ Wrangler failed to attach domain: {error_output[:500]}")
+                print(f"[Pages] ⚠️ Could not get project ID, skipping automatic domain attachment")
+                print(f"[Pages] ⚠️ You can attach the domain manually in Cloudflare Dashboard:")
+                print(f"[Pages] ⚠️   https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
             
             if not domain_attached:
                 print(f"[Pages] ⚠️ Could not attach domain automatically, but deployment succeeded")
@@ -2368,67 +2386,70 @@ def attach_domain():
         else:
             print(f"[Pages] ⚠️ Could not verify project list, continuing anyway...")
         
-        # NOTE: wrangler pages domain add doesn't support --account-id
-        # Authentication is handled via CLOUDFLARE_ACCOUNT_ID env var
-        result = subprocess.run(
-            [
-                "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
-                "--project-name", project_name
-            ],
-            cwd=wrangler_cwd,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=90
-        )
+        # Use Cloudflare API directly for domain attachment (more reliable than Wrangler CLI)
+        attach_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/pages/projects/{project_name}/domains"
+        attach_headers = {
+            "Authorization": f"Bearer {cf_api_token}",
+            "Content-Type": "application/json"
+        }
+        attach_data = {
+            "domain": custom_domain
+        }
         
-        if result.returncode == 0:
-            return jsonify({
-                'success': True,
-                'message': f'Custom domain {custom_domain} attached successfully',
-                'method': 'wrangler',
-                'command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}'
-            })
-        else:
-            error_output = result.stderr or result.stdout or ""
-            error_output_lower = error_output.lower()
+        try:
+            attach_response = requests.post(attach_url, headers=attach_headers, json=attach_data, timeout=90)
             
-            if any(phrase in error_output_lower for phrase in ["already", "already exists", "already configured", "is already"]):
+            if attach_response.status_code in [200, 201]:
+                return jsonify({
+                    'success': True,
+                    'message': f'Custom domain {custom_domain} attached successfully',
+                    'method': 'cloudflare_api'
+                })
+            elif attach_response.status_code == 409:
+                # Domain already exists - this is success
                 return jsonify({
                     'success': True,
                     'message': f'Custom domain {custom_domain} already attached',
-                    'method': 'wrangler'
+                    'method': 'cloudflare_api'
                 })
-            elif "1014" in error_output or "cname cross-user banned" in error_output_lower or "cross-user" in error_output_lower:
-                # Cloudflare Error 1014: CNAME Cross-User Banned
-                return jsonify({
-                    'success': False,
-                    'error': 'Error 1014: CNAME Cross-User Banned',
-                    'error_code': '1014',
-                    'explanation': 'This error occurs when the DNS CNAME record conflicts with an existing record, or the Pages project doesn\'t exist in the current Cloudflare account',
-                    'troubleshooting': [
-                        f"Verify the Pages project '{project_name}' exists in your Cloudflare account",
-                        f"Check Cloudflare DNS for existing CNAME records for {custom_domain}",
-                        "Remove any conflicting DNS records in Cloudflare Dashboard",
-                        "Wait a few minutes for DNS to propagate, then try again",
-                        f"Or manually add the domain: https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains"
-                    ],
-                    'wrangler_error': error_output[:1000],
-                    'manual_command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}',
-                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
-                    'project_exists': project_exists
-                }), 500
             else:
-                # Return detailed error with command to run manually
-                full_error = error_output[:1000]
-                return jsonify({
-                    'success': False,
-                    'error': f'Wrangler failed to attach domain',
-                    'wrangler_error': full_error,
-                    'manual_command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}',
-                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
-                    'project_exists': project_exists
-                }), 500
+                error_data = attach_response.json() if attach_response.content else {}
+                error_msg = error_data.get("errors", [{}])[0].get("message", attach_response.text)
+                error_code = error_data.get("errors", [{}])[0].get("code", attach_response.status_code)
+                
+                # Check for Error 1014
+                if "1014" in str(error_code) or "cname" in error_msg.lower():
+                    return jsonify({
+                        'success': False,
+                        'error': 'Error 1014: CNAME Cross-User Banned',
+                        'error_code': '1014',
+                        'explanation': 'This error occurs when the DNS CNAME record conflicts with an existing record, or the Pages project doesn\'t exist in the current Cloudflare account',
+                        'troubleshooting': [
+                            f"Verify the Pages project '{project_name}' exists in your Cloudflare account",
+                            f"Check Cloudflare DNS for existing CNAME records for {custom_domain}",
+                            "Remove any conflicting DNS records in Cloudflare Dashboard",
+                            "Wait a few minutes for DNS to propagate, then try again",
+                            f"Or manually add the domain: https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains"
+                        ],
+                        'api_error': error_msg,
+                        'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
+                        'project_exists': project_exists
+                    }), 500
+                else:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Cloudflare API failed to attach domain',
+                        'error_code': error_code,
+                        'api_error': error_msg,
+                        'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
+                        'project_exists': project_exists
+                    }), 500
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': f'Exception during API domain attachment: {str(e)}',
+                'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains'
+            }), 500
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

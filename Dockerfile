@@ -22,13 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
-    # For WeasyPrint/PDF generation
+    # For WeasyPrint/PDF generation (WeasyPrint 67.0 requires these)
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libgdk-pixbuf-xlib-2.0-0 \
     libffi-dev \
     shared-mime-info \
     libcairo2 \
+    libcairo2-dev \
     libgirepository1.0-dev \
     gir1.2-pango-1.0 \
     # For image processing
