@@ -89,12 +89,12 @@ _rembg_remove = None
 def get_rembg_remove():
     global _rembg_remove, REMBG_AVAILABLE
     if _rembg_remove is None:
-try:
-    from rembg import remove
+        try:
+            from rembg import remove
             _rembg_remove = remove
-except ImportError:
-    REMBG_AVAILABLE = False
-    print("WARNING: rembg not available")
+        except ImportError:
+            REMBG_AVAILABLE = False
+            print("WARNING: rembg not available")
     return _rembg_remove
 
 try:
@@ -1665,6 +1665,27 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     print(f"[Pages] ✅ Removed --verbose from build script (Vite doesn't support it)")
                     print(f"[Pages] Build script: {pkg['scripts']['build']}")
             
+            # Fix TypeScript configuration: Ensure module and moduleResolution match
+            tsconfig_path = os.path.join(temp_dir, "tsconfig.json")
+            if os.path.exists(tsconfig_path):
+                try:
+                    with open(tsconfig_path, 'r', encoding='utf-8') as f:
+                        tsconfig = json.load(f)
+                    
+                    compiler_options = tsconfig.get("compilerOptions", {})
+                    module_resolution = compiler_options.get("moduleResolution")
+                    module = compiler_options.get("module")
+                    
+                    # Fix: If moduleResolution is NodeNext, module must also be NodeNext
+                    if module_resolution == "NodeNext" and module != "NodeNext":
+                        compiler_options["module"] = "NodeNext"
+                        tsconfig["compilerOptions"] = compiler_options
+                        with open(tsconfig_path, 'w', encoding='utf-8') as f:
+                            json.dump(tsconfig, f, indent=2)
+                        print(f"[Pages] ✅ Fixed TypeScript config: set module to 'NodeNext' to match moduleResolution")
+                except Exception as tsconfig_err:
+                    print(f"[Pages] ⚠️ Could not fix tsconfig.json: {tsconfig_err}")
+            
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
             
             # Detect output directory
@@ -1723,35 +1744,75 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     }
                 }), 500
             
-            # Run build
+            # Run build with retry logic for fixable errors
             print(f"[Pages] Running npm run build in {temp_dir}...", flush=True)
             print(f"[Pages] Working directory contents: {os.listdir(temp_dir)[:10]}", flush=True)
             print(f"[Pages] Build script: {pkg['scripts'].get('build', 'N/A')}", flush=True)  # Log the actual script
             
-            result = subprocess.run(
-                ["npm", "run", "build"],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=300
-            )
-            if result.returncode != 0:
-                error_output = result.stderr or result.stdout or "No error output available"
-                print(f"[Pages] Build failed (exit code {result.returncode})", flush=True)
-                print(f"[Pages] Build stderr: {result.stderr[:1000] if result.stderr else '(empty)'}", flush=True)
-                print(f"[Pages] Build stdout: {result.stdout[:1000] if result.stdout else '(empty)'}", flush=True)
-                return jsonify({
-                    'error': f'Build failed: {error_output[:500]}',
-                    'details': {
-                        'exit_code': result.returncode,
-                        'stderr': result.stderr[:1000] if result.stderr else None,
-                        'stdout': result.stdout[:1000] if result.stdout else None
-                    },
-                    'build_script': pkg['scripts'].get('build', 'N/A')
-                }), 500
-            else:
-                print(f"[Pages] ✅ Build completed successfully", flush=True)
+            build_retry_count = 0
+            max_build_retries = 2  # Allow one retry after fixing config
+            build_success = False
+            
+            while build_retry_count <= max_build_retries and not build_success:
+                if build_retry_count > 0:
+                    print(f"[Pages] Retrying build (attempt {build_retry_count + 1}/{max_build_retries + 1})...", flush=True)
+                
+                result = subprocess.run(
+                    ["npm", "run", "build"],
+                    cwd=temp_dir,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=300
+                )
+                
+                if result.returncode == 0:
+                    print(f"[Pages] ✅ Build completed successfully", flush=True)
+                    build_success = True
+                    break
+                else:
+                    error_output = result.stderr or result.stdout or "No error output available"
+                    print(f"[Pages] Build failed (exit code {result.returncode})", flush=True)
+                    print(f"[Pages] Build stderr: {result.stderr[:1000] if result.stderr else '(empty)'}", flush=True)
+                    print(f"[Pages] Build stdout: {result.stdout[:1000] if result.stdout else '(empty)'}", flush=True)
+                    
+                    # Check for TypeScript configuration error and fix it
+                    if "TS5110" in error_output and "module" in error_output and "moduleResolution" in error_output:
+                        print(f"[Pages] Detected TypeScript config error (TS5110), attempting to fix...", flush=True)
+                        tsconfig_path = os.path.join(temp_dir, "tsconfig.json")
+                        if os.path.exists(tsconfig_path):
+                            try:
+                                with open(tsconfig_path, 'r', encoding='utf-8') as f:
+                                    tsconfig = json.load(f)
+                                
+                                compiler_options = tsconfig.get("compilerOptions", {})
+                                module_resolution = compiler_options.get("moduleResolution")
+                                
+                                # Fix: If moduleResolution is NodeNext, module must also be NodeNext
+                                if module_resolution == "NodeNext":
+                                    compiler_options["module"] = "NodeNext"
+                                    tsconfig["compilerOptions"] = compiler_options
+                                    with open(tsconfig_path, 'w', encoding='utf-8') as f:
+                                        json.dump(tsconfig, f, indent=2)
+                                    print(f"[Pages] ✅ Fixed TypeScript config: set module to 'NodeNext'", flush=True)
+                                    build_retry_count += 1
+                                    continue  # Retry build
+                            except Exception as tsconfig_err:
+                                print(f"[Pages] ⚠️ Could not fix tsconfig.json: {tsconfig_err}", flush=True)
+                    
+                    # If we can't fix it or max retries reached, return error
+                    if build_retry_count >= max_build_retries:
+                        return jsonify({
+                            'error': f'Build failed: {error_output[:500]}',
+                            'details': {
+                                'exit_code': result.returncode,
+                                'stderr': result.stderr[:1000] if result.stderr else None,
+                                'stdout': result.stdout[:1000] if result.stdout else None
+                            },
+                            'build_script': pkg['scripts'].get('build', 'N/A')
+                        }), 500
+                    else:
+                        build_retry_count += 1
         
         # Check if output directory exists
         build_path = os.path.join(temp_dir, output_dir)
@@ -1798,18 +1859,18 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 import time
                 time.sleep(5)
             
-        result = subprocess.run(
-            [
-                "npx", "wrangler", "pages", "project", "create", project_name,
+            result = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "project", "create", project_name,
                     "--production-branch", "main",
                     "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-            ],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=120
-        )
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=120
+            )
             
             if result.returncode == 0:
                 print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
@@ -1859,28 +1920,28 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             deployment_branch = "preview" if environment == "dev" else "main"
             print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
             
-        result = subprocess.run(
-            [
-                "npx", "wrangler", "pages", "deploy", build_path,
-                "--project-name", project_name,
+            result = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "deploy", build_path,
+                    "--project-name", project_name,
                     "--branch", deployment_branch,
                     "--commit-dirty=true",
                     "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-            ],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=300
-        )
-        
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=300
+            )
+            
             if result.returncode == 0:
                 # Success - parse deployment URL
-        for line in result.stdout.split('\n'):
-            if 'https://' in line and '.pages.dev' in line:
-                deployment_url = line.strip()
-                break
-        
+                for line in result.stdout.split('\n'):
+                    if 'https://' in line and '.pages.dev' in line:
+                        deployment_url = line.strip()
+                        break
+                
                 if deployment_url:
                     print(f"[Pages] ✅ Deployed successfully to {environment} environment: {deployment_url}")
                     if environment == "dev":
@@ -1996,20 +2057,20 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                                 "content": pages_dev_url,  # Points to project_name.pages.dev
                                 "proxied": True,  # Enable Cloudflare proxy (orange cloud)
                                 "ttl": 1  # Auto TTL
-                },
-                timeout=30
-            )
-            
-            if dns_response.status_code in [200, 201]:
+                            },
+                            timeout=30
+                        )
+                        
+                        if dns_response.status_code in [200, 201]:
                             print(f"[Pages] ✅ DNS CNAME created: {custom_domain} -> {pages_dev_url}")
                             dns_created = True
-            else:
-                dns_result = dns_response.json()
-                # Check if record already exists (code 81057)
-                if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
+                        else:
+                            dns_result = dns_response.json()
+                            # Check if record already exists (code 81057)
+                            if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
                                 print(f"[Pages] ✅ DNS record already exists (that's OK)")
                                 dns_created = True
-                else:
+                            else:
                                 error_msg = dns_result.get("errors", [{}])[0].get("message", "Unknown error")
                                 print(f"[Pages] ❌ DNS creation failed: {dns_response.status_code} - {error_msg}")
                                 print(f"[Pages] Full response: {dns_response.text[:500]}")
@@ -2143,7 +2204,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                         domain_names = [d.get("domain", "") for d in domains if isinstance(d, dict)]
                         if custom_domain in domain_names:
                             print(f"[Pages] ✅ Verified: Custom domain is attached to Pages project")
-            else:
+                        else:
                             print(f"[Pages] ⚠️ Warning: Custom domain not found in attached domains list")
                             print(f"[Pages] ⚠️ Attached domains: {domain_names}")
                             print(f"[Pages] ⚠️ It may take a few moments to propagate. If it doesn't appear, add manually:")
