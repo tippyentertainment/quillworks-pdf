@@ -1887,13 +1887,14 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             
             print(f"[Pages] Attempting to create project (attempt {attempt + 1}/{max_project_retries})...")
             print(f"[Pages] Project name: {project_name}")
-            print(f"[Pages] Account ID: {cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}")
-            # Use --yes flag to avoid interactive prompts, and use @latest to ensure we have the latest wrangler
+            print(f"[Pages] Account ID (via env): {cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}")
+            # Use --yes flag to avoid interactive prompts
+            # NOTE: wrangler pages project create does NOT support --account-id flag
+            # Authentication is handled via CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN env vars
             result = subprocess.run(
                 [
                     "npx", "--yes", "wrangler@latest", "pages", "project", "create", project_name,
-                    "--production-branch", "main",
-                    "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+                    "--production-branch", "main"
                 ],
                 cwd=temp_dir,
                 capture_output=True,
@@ -1956,7 +1957,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                         'attempts': attempt + 1,
                         'is_retryable': is_retryable
                     },
-                    'manual_command': f'npx wrangler pages project create {project_name} --production-branch main --account-id {cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")}'
+                    'manual_command': f'CLOUDFLARE_ACCOUNT_ID={cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")} npx wrangler pages project create {project_name} --production-branch main'
                 }), 500
         
         if not project_creation_success:
@@ -1969,7 +1970,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 'project_name': project_name,
                 'environment': environment,
                 'message': 'The Pages project must be created before deployment can proceed',
-                'manual_command': f'npx wrangler pages project create {project_name} --production-branch main --account-id {cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")}',
+                'manual_command': f'CLOUDFLARE_ACCOUNT_ID={cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")} npx wrangler pages project create {project_name} --production-branch main',
                 'troubleshooting': 'Check: 1) Cloudflare API token has Pages:Edit permission, 2) Account ID is correct, 3) Project name is valid (alphanumeric, hyphens, underscores only)'
             }), 500
         
@@ -1997,13 +1998,13 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             deployment_branch = "preview" if environment == "dev" else "main"
             print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
             
+            # NOTE: Authentication handled via CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN env vars
             result = subprocess.run(
                 [
                     "npx", "wrangler", "pages", "deploy", build_path,
                     "--project-name", project_name,
                     "--branch", deployment_branch,
-                    "--commit-dirty=true",
-                    "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+                    "--commit-dirty=true"
                 ],
                 cwd=temp_dir,
                 capture_output=True,
@@ -2182,11 +2183,12 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 # Wrangler doesn't need the project files, just the credentials
                 wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
                 
+                # NOTE: wrangler pages domain add doesn't support --account-id
+                # Authentication is handled via CLOUDFLARE_ACCOUNT_ID env var
                 domain_result = subprocess.run(
                     [
                         "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
-                        "--project-name", project_name,
-                        "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+                        "--project-name", project_name
                     ],
                     cwd=wrangler_cwd,
                     capture_output=True,
@@ -2355,11 +2357,12 @@ def attach_domain():
         # Use home directory or temp for Wrangler (doesn't need project files)
         wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
         
+        # NOTE: wrangler pages domain add doesn't support --account-id
+        # Authentication is handled via CLOUDFLARE_ACCOUNT_ID env var
         result = subprocess.run(
             [
                 "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
-                "--project-name", project_name,
-                "--account-id", cf_account_id
+                "--project-name", project_name
             ],
             cwd=wrangler_cwd,
             capture_output=True,
