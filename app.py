@@ -1691,15 +1691,58 @@ def deploy_pages():
         
         print(f"[Pages] ✅ Deployed successfully: {deployment_url}", flush=True)
         
-        # Add custom domain to the Pages project using wrangler CLI
+        # Add custom domain to the Pages project
         print(f"[Pages] Adding custom domain: {custom_domain}", flush=True)
         
         try:
-            # Use wrangler CLI to add custom domain
+            import requests as req
+            api_token = env.get("CLOUDFLARE_API_TOKEN")
+            account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
+            zone_id = env.get("CLOUDFLARE_ZONE_ID")
+            
+            # Step 1: Create DNS CNAME record pointing to pages.dev
+            pages_dev_url = f"{project_name}.pages.dev"
+            print(f"[Pages] Creating DNS CNAME: {custom_domain} -> {pages_dev_url}", flush=True)
+            
+            if zone_id:
+                # Extract subdomain from custom_domain (e.g., "vibe-1616rpk2" from "vibe-1616rpk2.quillworks.org")
+                domain_parts = custom_domain.split('.')
+                if len(domain_parts) >= 2:
+                    subdomain_name = domain_parts[0]  # Just the subdomain part
+                    
+                    dns_response = req.post(
+                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                        headers={
+                            "Authorization": f"Bearer {api_token}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "type": "CNAME",
+                            "name": subdomain_name,  # Just the subdomain part
+                            "content": pages_dev_url,
+                            "proxied": True
+                        },
+                        timeout=30
+                    )
+                    
+                    if dns_response.status_code in [200, 201]:
+                        print(f"[Pages] ✅ DNS CNAME created: {custom_domain}", flush=True)
+                    else:
+                        dns_result = dns_response.json()
+                        # Check if record already exists (code 81057)
+                        if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
+                            print(f"[Pages] DNS record already exists, that's OK", flush=True)
+                        else:
+                            print(f"[Pages] DNS response: {dns_response.status_code} - {dns_response.text[:300]}", flush=True)
+            else:
+                print(f"[Pages] No zone_id provided, skipping DNS record creation", flush=True)
+            
+            # Step 2: Add custom domain to Pages project using Wrangler CLI
+            print(f"[Pages] Adding custom domain to Pages project via Wrangler...", flush=True)
             domain_result = subprocess.run(
                 [
-                    "npx", "wrangler", "pages", "project", "update", project_name,
-                    "--production-branch", "main"
+                    "npx", "wrangler", "pages", "domain", "add", custom_domain,
+                    "--project-name", project_name
                 ],
                 cwd=temp_dir,
                 capture_output=True,
@@ -1707,55 +1750,21 @@ def deploy_pages():
                 env=env,
                 timeout=60
             )
-            print(f"[Pages] Project update result: {domain_result.returncode}", flush=True)
             
-            # Try adding domain via wrangler pages deployment
-            domain_add_result = subprocess.run(
-                [
-                    "npx", "wrangler", "pages", "deployment", "tail",
-                    "--project-name", project_name
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=10
-            )
-            
-            # Fallback: Use Cloudflare API with proper validation
-            import requests as req
-            api_token = env.get("CLOUDFLARE_API_TOKEN")
-            account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
-            
-            if api_token and account_id:
-                print(f"[Pages] Trying API: account={account_id[:8]}..., project={project_name}", flush=True)
-                
-                api_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains"
-                print(f"[Pages] API URL: {api_url}", flush=True)
-                
-                domain_response = req.post(
-                    api_url,
-                    headers={
-                        "Authorization": f"Bearer {api_token}",
-                        "Content-Type": "application/json"
-                    },
-                    json={"name": custom_domain},
-                    timeout=30
-                )
-                
-                print(f"[Pages] Custom domain response: {domain_response.status_code}", flush=True)
-                print(f"[Pages] Response body: {domain_response.text}", flush=True)
-                
-                if domain_response.status_code in [200, 201]:
-                    print(f"[Pages] ✅ Custom domain added: {custom_domain}", flush=True)
-                elif domain_response.status_code == 409:
-                    print(f"[Pages] Custom domain already exists: {custom_domain}", flush=True)
-                else:
-                    print(f"[Pages] ⚠️ API failed, domain may need manual setup: {custom_domain}", flush=True)
+            if domain_result.returncode == 0:
+                print(f"[Pages] ✅ Custom domain added to Pages: {custom_domain}", flush=True)
             else:
-                print(f"[Pages] ⚠️ Missing credentials for custom domain API", flush=True)
+                # Check if domain already exists (common error message)
+                if "already" in domain_result.stderr.lower() or "already" in domain_result.stdout.lower():
+                    print(f"[Pages] Custom domain already exists, that's OK", flush=True)
+                else:
+                    print(f"[Pages] Wrangler domain add output: {domain_result.stdout}", flush=True)
+                    print(f"[Pages] Wrangler domain add error: {domain_result.stderr[:500]}", flush=True)
+                
         except Exception as domain_err:
             print(f"[Pages] Warning: Could not add custom domain: {domain_err}", flush=True)
+            import traceback
+            traceback.print_exc()
         
         return jsonify({
             "success": True,
