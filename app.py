@@ -1688,16 +1688,22 @@ def deploy_pages():
         
         # Add custom domain to the Pages project
         custom_domain = f"{subdomain}.quillworks.org"
-        print(f"[Pages] Adding custom domain: {custom_domain}")
         
         import requests as req
         api_token = env.get("CLOUDFLARE_API_TOKEN")
         account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
         
+        print(f"[Pages] Adding custom domain: {custom_domain}")
+        print(f"[Pages] Project name: {project_name}")
+        print(f"[Pages] Account ID: {account_id[:8]}..." if account_id else "[Pages] Account ID: None")
+        
         try:
             # Add custom domain via Cloudflare API
+            api_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains"
+            print(f"[Pages] API URL: {api_url}")
+            
             domain_response = req.post(
-                f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains",
+                api_url,
                 headers={
                     "Authorization": f"Bearer {api_token}",
                     "Content-Type": "application/json"
@@ -1706,13 +1712,19 @@ def deploy_pages():
                 timeout=30
             )
             
+            print(f"[Pages] Custom domain response: {domain_response.status_code}")
+            print(f"[Pages] Response body: {domain_response.text}")
+            
             if domain_response.status_code in [200, 201]:
                 print(f"[Pages] ✅ Custom domain added: {custom_domain}")
+            elif domain_response.status_code == 409:
+                print(f"[Pages] Custom domain already exists: {custom_domain}")
             else:
-                # Domain might already exist, that's OK
-                print(f"[Pages] Custom domain response: {domain_response.status_code} - {domain_response.text[:200]}")
+                print(f"[Pages] ⚠️ Failed to add custom domain: {domain_response.status_code}")
         except Exception as domain_err:
             print(f"[Pages] Warning: Could not add custom domain: {domain_err}")
+            import traceback
+            traceback.print_exc()
         
         return jsonify({
             "success": True,
