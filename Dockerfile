@@ -13,7 +13,7 @@ ENV GOROOT=/usr/local/go
 ENV GOPATH=/go
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV JAVA_HOME=/usr/lib/jvm/default-java
 ENV PATH=/usr/local/cargo/bin:/usr/local/go/bin:/go/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/34.0.0:$PATH
 
 # Install system dependencies, Node.js, PHP, and Rust
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # For WeasyPrint/PDF generation
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
-    libgdk-pixbuf2.0-0 \
+    libgdk-pixbuf-xlib-2.0-0 \
     libffi-dev \
     shared-mime-info \
     libcairo2 \
@@ -56,8 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # SSL for Rust
     libssl-dev \
     pkg-config \
-    # Java for Android development
-    openjdk-17-jdk-headless \
+    # Java for Android development (use default-jdk-headless for Debian Trixie compatibility)
+    default-jdk-headless \
     # Unzip for Android SDK
     unzip \
     # Clean up
