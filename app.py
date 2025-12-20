@@ -1914,37 +1914,102 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
         zone_id = env.get("CLOUDFLARE_ZONE_ID")
         
         try:
-            # Step 1: Create DNS CNAME record pointing to pages.dev
+            # Step 1: Create/verify DNS CNAME record pointing to pages.dev
             pages_dev_url = f"{project_name}.pages.dev"
-            print(f"[Pages] Creating DNS CNAME: {custom_domain} -> {pages_dev_url}")
+            print(f"[Pages] Creating/verifying DNS CNAME: {custom_domain} -> {pages_dev_url}")
             
+            dns_created = False
             if zone_id:
-                dns_response = req.post(
-                    f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-                    headers={
-                        "Authorization": f"Bearer {api_token}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "type": "CNAME",
-                        "name": subdomain,  # Just the subdomain part
-                        "content": pages_dev_url,
-                        "proxied": True
-                    },
-                    timeout=30
-                )
+                # First, check if DNS record already exists
+                try:
+                    check_response = req.get(
+                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                        headers={
+                            "Authorization": f"Bearer {api_token}",
+                            "Content-Type": "application/json"
+                        },
+                        params={"name": custom_domain, "type": "CNAME"},
+                        timeout=30
+                    )
+                    
+                    if check_response.status_code == 200:
+                        existing_records = check_response.json().get("result", [])
+                        if existing_records:
+                            existing_record = existing_records[0]
+                            if existing_record.get("content") == pages_dev_url:
+                                print(f"[Pages] ✅ DNS CNAME already exists and is correct: {custom_domain}")
+                                dns_created = True
+                            else:
+                                print(f"[Pages] ⚠️ DNS record exists but points to wrong target. Updating...")
+                                # Update existing record
+                                update_response = req.put(
+                                    f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{existing_record['id']}",
+                                    headers={
+                                        "Authorization": f"Bearer {api_token}",
+                                        "Content-Type": "application/json"
+                                    },
+                                    json={
+                                        "type": "CNAME",
+                                        "name": subdomain,
+                                        "content": pages_dev_url,
+                                        "proxied": True
+                                    },
+                                    timeout=30
+                                )
+                                if update_response.status_code in [200, 201]:
+                                    print(f"[Pages] ✅ DNS CNAME updated: {custom_domain}")
+                                    dns_created = True
+                                else:
+                                    print(f"[Pages] ⚠️ Failed to update DNS record: {update_response.status_code}")
+                except Exception as check_err:
+                    print(f"[Pages] ⚠️ Error checking DNS records: {check_err}")
                 
-                if dns_response.status_code in [200, 201]:
-                    print(f"[Pages] ✅ DNS CNAME created: {custom_domain}")
-                else:
-                    dns_result = dns_response.json()
-                    # Check if record already exists (code 81057)
-                    if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
-                        print(f"[Pages] DNS record already exists, that's OK")
-                    else:
-                        print(f"[Pages] DNS response: {dns_response.status_code} - {dns_response.text[:300]}")
+                # Create DNS record if it doesn't exist
+                if not dns_created:
+                    try:
+                        dns_response = req.post(
+                            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                            headers={
+                                "Authorization": f"Bearer {api_token}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "type": "CNAME",
+                                "name": subdomain,  # Just the subdomain part (e.g., "dev-vibe-166lx4csd" or "vibe-166lx4csd")
+                                "content": pages_dev_url,  # Points to project_name.pages.dev
+                                "proxied": True,  # Enable Cloudflare proxy (orange cloud)
+                                "ttl": 1  # Auto TTL
+                            },
+                            timeout=30
+                        )
+                        
+                        if dns_response.status_code in [200, 201]:
+                            print(f"[Pages] ✅ DNS CNAME created: {custom_domain} -> {pages_dev_url}")
+                            dns_created = True
+                        else:
+                            dns_result = dns_response.json()
+                            # Check if record already exists (code 81057)
+                            if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
+                                print(f"[Pages] ✅ DNS record already exists (that's OK)")
+                                dns_created = True
+                            else:
+                                error_msg = dns_result.get("errors", [{}])[0].get("message", "Unknown error")
+                                print(f"[Pages] ❌ DNS creation failed: {dns_response.status_code} - {error_msg}")
+                                print(f"[Pages] Full response: {dns_response.text[:500]}")
+                    except Exception as dns_err:
+                        print(f"[Pages] ❌ Exception creating DNS record: {dns_err}")
+                
+                if not dns_created:
+                    print(f"[Pages] ⚠️ WARNING: DNS record may not be set correctly for {custom_domain}")
+                    print(f"[Pages] ⚠️ This may cause 522 errors. Please verify DNS manually if needed.")
+                    print(f"[Pages] ⚠️ Expected DNS: {subdomain}.quillworks.org CNAME -> {pages_dev_url} (proxied)")
+                    print(f"[Pages] ⚠️ You can create it manually in Cloudflare Dashboard: DNS -> Records -> Add CNAME")
+                    print(f"[Pages] ⚠️   Name: {subdomain}")
+                    print(f"[Pages] ⚠️   Target: {pages_dev_url}")
+                    print(f"[Pages] ⚠️   Proxy status: Proxied (orange cloud)")
             else:
-                print(f"[Pages] No zone_id provided, skipping DNS record creation")
+                print(f"[Pages] ⚠️ No zone_id provided, skipping DNS record creation")
+                print(f"[Pages] ⚠️ DNS must be configured manually for {custom_domain} to work")
             
             # Step 2: Add custom domain to Pages project using Wrangler CLI with retry logic
             print(f"[Pages] Adding custom domain to Pages project via Wrangler CLI...")
@@ -2016,10 +2081,38 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 print(f"[Pages] ⚠️ To attach the custom domain, run:")
                 print(f"[Pages] ⚠️   npx wrangler pages domain add {custom_domain} --project-name {project_name}")
             
-            # Step 3: Verify domain is attached (optional check via API)
+            # Step 3: Verify DNS record exists and is correct
+            if dns_created and zone_id:
+                try:
+                    print(f"[Pages] Verifying DNS record...")
+                    verify_dns = req.get(
+                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                        headers={
+                            "Authorization": f"Bearer {api_token}",
+                            "Content-Type": "application/json"
+                        },
+                        params={"name": custom_domain, "type": "CNAME"},
+                        timeout=30
+                    )
+                    if verify_dns.status_code == 200:
+                        dns_records = verify_dns.json().get("result", [])
+                        if dns_records:
+                            record = dns_records[0]
+                            if record.get("content") == pages_dev_url:
+                                print(f"[Pages] ✅ DNS verified: {custom_domain} -> {pages_dev_url}")
+                            else:
+                                print(f"[Pages] ⚠️ DNS record exists but points to wrong target: {record.get('content')}")
+                        else:
+                            print(f"[Pages] ⚠️ DNS record not found after creation")
+                    else:
+                        print(f"[Pages] Could not verify DNS (API returned {verify_dns.status_code})")
+                except Exception as dns_verify_err:
+                    print(f"[Pages] Could not verify DNS record: {dns_verify_err}")
+            
+            # Step 4: Verify domain is attached to Pages project (optional check via API)
             if domain_attached:
                 try:
-                    print(f"[Pages] Verifying domain attachment via API...")
+                    print(f"[Pages] Verifying domain attachment to Pages project...")
                     verify_response = req.get(
                         f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains",
                         headers={
