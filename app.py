@@ -1686,6 +1686,34 @@ def deploy_pages():
         
         print(f"[Pages] ✅ Deployed successfully: {deployment_url}")
         
+        # Add custom domain to the Pages project
+        custom_domain = f"{subdomain}.quillworks.org"
+        print(f"[Pages] Adding custom domain: {custom_domain}")
+        
+        import requests as req
+        api_token = env.get("CLOUDFLARE_API_TOKEN")
+        account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
+        
+        try:
+            # Add custom domain via Cloudflare API
+            domain_response = req.post(
+                f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains",
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json"
+                },
+                json={"name": custom_domain},
+                timeout=30
+            )
+            
+            if domain_response.status_code in [200, 201]:
+                print(f"[Pages] ✅ Custom domain added: {custom_domain}")
+            else:
+                # Domain might already exist, that's OK
+                print(f"[Pages] Custom domain response: {domain_response.status_code} - {domain_response.text[:200]}")
+        except Exception as domain_err:
+            print(f"[Pages] Warning: Could not add custom domain: {domain_err}")
+        
         return jsonify({
             "success": True,
             "url": deployment_url,
