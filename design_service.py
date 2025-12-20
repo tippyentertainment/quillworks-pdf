@@ -9,6 +9,7 @@ import json
 import uuid
 import shutil
 import base64
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
@@ -41,55 +42,97 @@ PUBLIC_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- ATLASCLOUD HELPERS ----------
 
-def atlas_generate_image(model: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def atlas_generate_image(model: str, payload: Dict[str, Any], retry_count: int = 0, max_retries: int = 2) -> Dict[str, Any]:
     """
-    Thin wrapper around AtlasCloud image API.
+    Thin wrapper around AtlasCloud image API with retry logic for transient errors.
+    Uses the correct API endpoint: /api/v1/model/generateImage with model in payload.
     """
     if not ATLASCLOUD_API_KEY:
         raise Exception("ATLASCLOUD_API_KEY is not set")
-    url = f"https://api.atlascloud.ai/api/v1/model/{model}/generateImage"
+    # Correct API endpoint - model is passed in payload, not URL
+    url = "https://api.atlascloud.ai/api/v1/model/generateImage"
     headers = {
         "Authorization": f"Bearer {ATLASCLOUD_API_KEY}",
         "Content-Type": "application/json",
     }
+    # Add model to payload
+    full_payload = {**payload, "model": model}
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        resp = requests.post(url, headers=headers, json=full_payload, timeout=120)
         if resp.status_code >= 400:
-            print(f"[AtlasCloud] Error response: {resp.status_code} - {resp.text[:1000]}")
+            # Get raw response text for debugging
+            raw_text = resp.text[:1000] if resp.text else "(empty response)"
+            print(f"[AtlasCloud] Error response: {resp.status_code} - {raw_text}")
+            
             error_text = f"HTTP {resp.status_code}"
+            error_details = None
+            
+            # Try to parse JSON, but handle malformed responses gracefully
             try:
-                error_json = resp.json()
-                # Try various error field patterns, filtering out null/None values
-                candidates = [
-                    error_json.get("error"),
-                    error_json.get("message"),
-                    error_json.get("detail"),
-                    error_json.get("data", {}).get("error") if isinstance(error_json.get("data"), dict) else None,
-                    error_json.get("data", {}).get("message") if isinstance(error_json.get("data"), dict) else None,
-                ]
-                for candidate in candidates:
-                    if candidate and isinstance(candidate, str) and candidate.strip() and candidate.lower() != "null":
-                        error_text = candidate.strip()
-                        break
-            except Exception as parse_err:
+                # Clean up malformed JSON (remove null strings, etc.)
+                cleaned_text = raw_text.strip()
+                if cleaned_text and not cleaned_text.startswith("null"):
+                    error_json = resp.json()
+                    # Try various error field patterns, filtering out null/None values
+                    candidates = [
+                        error_json.get("error"),
+                        error_json.get("message"),
+                        error_json.get("detail"),
+                        error_json.get("data", {}).get("error") if isinstance(error_json.get("data"), dict) else None,
+                        error_json.get("data", {}).get("message") if isinstance(error_json.get("data"), dict) else None,
+                    ]
+                    for candidate in candidates:
+                        if candidate and isinstance(candidate, str) and candidate.strip() and candidate.lower() not in ["null", "none", ""]:
+                            error_text = candidate.strip()
+                            break
+                    error_details = error_json
+            except (json.JSONDecodeError, ValueError) as parse_err:
                 print(f"[AtlasCloud] Failed to parse error JSON: {parse_err}")
+                print(f"[AtlasCloud] Raw response: {raw_text}")
+                # If response is just "null" repeated, it's likely a server error
+                if "null" in raw_text.lower() and len(raw_text.strip()) < 50:
+                    error_text = "Server returned malformed response (likely internal error)"
+            
+            # Retry logic for 500 errors (transient server errors)
+            if resp.status_code == 500 and retry_count < max_retries:
+                import time
+                wait_time = (retry_count + 1) * 2  # Exponential backoff: 2s, 4s
+                print(f"[AtlasCloud] Server error 500, retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries + 1})...")
+                time.sleep(wait_time)
+                return atlas_generate_image(model, payload, retry_count + 1, max_retries)
             
             if resp.status_code == 500:
-                raise Exception(f"AtlasCloud server error - the service may be temporarily unavailable. Please try again.")
+                raise Exception(f"AtlasCloud server error - the service may be temporarily unavailable. Please try again. (Status: {resp.status_code})")
             raise Exception(f"AtlasCloud API error (status {resp.status_code}): {error_text}")
+        
         response_data = resp.json()
         if not response_data:
             raise Exception("AtlasCloud API returned empty response")
         return response_data
     except requests.exceptions.Timeout:
+        # Retry on timeout if we haven't exceeded max retries
+        if retry_count < max_retries:
+            import time
+            wait_time = (retry_count + 1) * 2
+            print(f"[AtlasCloud] Request timed out, retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries + 1})...")
+            time.sleep(wait_time)
+            return atlas_generate_image(model, payload, retry_count + 1, max_retries)
         raise Exception("AtlasCloud API request timed out after 120 seconds")
     except requests.exceptions.RequestException as e:
+        # Retry on connection errors if we haven't exceeded max retries
+        if retry_count < max_retries:
+            import time
+            wait_time = (retry_count + 1) * 2
+            print(f"[AtlasCloud] Request failed: {str(e)}, retrying in {wait_time}s (attempt {retry_count + 1}/{max_retries + 1})...")
+            time.sleep(wait_time)
+            return atlas_generate_image(model, payload, retry_count + 1, max_retries)
         raise Exception(f"AtlasCloud API request failed: {str(e)}")
 
 
 def poll_for_image(prediction_id: str, max_attempts: int = 30) -> Dict[str, Any]:
     """
     Poll AtlasCloud for image completion.
+    Uses correct polling endpoint: /api/v1/model/prediction/{prediction_id}
     """
     if not ATLASCLOUD_API_KEY:
         raise Exception("ATLASCLOUD_API_KEY is not set")
@@ -100,7 +143,7 @@ def poll_for_image(prediction_id: str, max_attempts: int = 30) -> Dict[str, Any]
     import time
     for attempt in range(max_attempts):
         if attempt > 0:
-            time.sleep(3)
+            time.sleep(2)  # Changed from 3 to 2 seconds to match API docs
         try:
             resp = requests.get(poll_url, headers=headers, timeout=30)
             if resp.status_code >= 400:
@@ -140,15 +183,32 @@ def poll_for_image(prediction_id: str, max_attempts: int = 30) -> Dict[str, Any]
 def generate_nano_banana_design(prompt: str, width=1920, height=1080) -> Image.Image:
     """
     Use Nano Banana (text-to-image) via AtlasCloud to get the base mockup.
+    Uses correct API format with aspect_ratio instead of width/height.
     """
+    # Calculate aspect ratio from width/height (default 16:9 for 1920x1080)
+    # Common ratios: 16:9, 3:4, 4:3, 1:1, 9:16
+    ratio = f"{width}:{height}"
+    # Normalize to common aspect ratios
+    if width == 1920 and height == 1080:
+        aspect_ratio = "16:9"
+    elif width == 1080 and height == 1440:
+        aspect_ratio = "3:4"
+    elif width == 1440 and height == 1080:
+        aspect_ratio = "4:3"
+    elif width == height:
+        aspect_ratio = "1:1"
+    else:
+        # Calculate GCD to simplify ratio
+        divisor = math.gcd(width, height)
+        aspect_ratio = f"{width // divisor}:{height // divisor}"
+    
     payload = {
         "prompt": prompt,
-        "width": width,
-        "height": height,
+        "aspect_ratio": aspect_ratio,
         "output_format": "png",
         "enable_base64_output": False,
         "enable_sync_mode": False,
-        "resolution": "4k",
+        "resolution": "2k",  # Changed from "4k" to match API docs
     }
     
     # Initiate generation
