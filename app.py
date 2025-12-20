@@ -1669,13 +1669,12 @@ def deploy_pages():
                         'available_scripts': list(scripts.keys())
                     }), 500
             
-            # Run build with more verbose output
+            # Run build
             print(f"[Pages] Running npm run build in {temp_dir}...", flush=True)
             print(f"[Pages] Working directory contents: {os.listdir(temp_dir)[:10]}", flush=True)
             
-            # Try running build with npm's verbose flag for better error visibility
             result = subprocess.run(
-                ["npm", "run", "build", "--", "--verbose"] if "vite" in deps else ["npm", "run", "build"],
+                ["npm", "run", "build"],
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
