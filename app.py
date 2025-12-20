@@ -1800,6 +1800,62 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     print(f"[Pages] Build stderr: {result.stderr[:1000] if result.stderr else '(empty)'}", flush=True)
                     print(f"[Pages] Build stdout: {result.stdout[:1000] if result.stdout else '(empty)'}", flush=True)
                     
+                    # Check for missing npm packages and try to install them
+                    missing_packages = []
+                    if "Cannot find module" in error_output or "TS2307" in error_output:
+                        import re
+                        # Extract module names from error messages like "Cannot find module '@react-pdf/renderer'"
+                        module_pattern = r"Cannot find module ['\"]([^'\"]+)['\"]"
+                        matches = re.findall(module_pattern, error_output)
+                        missing_packages.extend(matches)
+                        
+                        # Also check for TS2307 errors
+                        ts2307_pattern = r"TS2307.*module ['\"]([^'\"]+)['\"]"
+                        ts_matches = re.findall(ts2307_pattern, error_output)
+                        missing_packages.extend(ts_matches)
+                        
+                        if missing_packages:
+                            # Remove duplicates and @types packages (install the main package)
+                            missing_packages = list(set([pkg for pkg in missing_packages if not pkg.startswith('@types/')]))
+                            if missing_packages:
+                                print(f"[Pages] Detected missing packages: {missing_packages}", flush=True)
+                                print(f"[Pages] Attempting to install missing packages...", flush=True)
+                                install_result = subprocess.run(
+                                    ["npm", "install", "--legacy-peer-deps"] + missing_packages,
+                                    cwd=temp_dir,
+                                    capture_output=True,
+                                    text=True,
+                                    env=env,
+                                    timeout=180
+                                )
+                                if install_result.returncode == 0:
+                                    print(f"[Pages] ✅ Installed missing packages: {', '.join(missing_packages)}", flush=True)
+                                    build_retry_count += 1
+                                    continue  # Retry build
+                                else:
+                                    print(f"[Pages] ⚠️ Failed to install missing packages: {install_result.stderr[:500]}", flush=True)
+                    
+                    # Check for TypeScript implicit 'any' errors and relax strictness
+                    if "TS7031" in error_output and "implicitly has an 'any' type" in error_output:
+                        print(f"[Pages] Detected TypeScript implicit 'any' errors, attempting to relax strictness...", flush=True)
+                        tsconfig_path = os.path.join(temp_dir, "tsconfig.json")
+                        if os.path.exists(tsconfig_path):
+                            try:
+                                with open(tsconfig_path, 'r', encoding='utf-8') as f:
+                                    tsconfig = json.load(f)
+                                
+                                compiler_options = tsconfig.get("compilerOptions", {})
+                                # Disable noImplicitAny to allow implicit any types
+                                compiler_options["noImplicitAny"] = False
+                                tsconfig["compilerOptions"] = compiler_options
+                                with open(tsconfig_path, 'w', encoding='utf-8') as f:
+                                    json.dump(tsconfig, f, indent=2)
+                                print(f"[Pages] ✅ Relaxed TypeScript strictness: disabled noImplicitAny", flush=True)
+                                build_retry_count += 1
+                                continue  # Retry build
+                            except Exception as tsconfig_err:
+                                print(f"[Pages] ⚠️ Could not fix tsconfig.json: {tsconfig_err}", flush=True)
+                    
                     # Check for TypeScript configuration error and fix it
                     if "TS5110" in error_output and "module" in error_output and "moduleResolution" in error_output:
                         print(f"[Pages] Detected TypeScript config error (TS5110), attempting to fix...", flush=True)
@@ -1921,6 +1977,26 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 # Small delay to ensure project is fully ready
                 import time
                 time.sleep(2)
+                
+                # Verify project appears in list
+                print(f"[Pages] Verifying project appears in account...")
+                verify_list = subprocess.run(
+                    ["npx", "--yes", "wrangler@latest", "pages", "project", "list"],
+                    cwd=temp_dir,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=30
+                )
+                if verify_list.returncode == 0:
+                    if project_name in verify_list.stdout:
+                        print(f"[Pages] ✅ Verified: Project '{project_name}' appears in project list")
+                    else:
+                        print(f"[Pages] ⚠️ Warning: Project '{project_name}' not found in project list")
+                        print(f"[Pages] Project list output: {verify_list.stdout[:500]}")
+                else:
+                    print(f"[Pages] ⚠️ Could not verify project list (exit code {verify_list.returncode})")
+                
                 break
             
             # Check for "already exists" - this is actually success (project already created)
