@@ -1654,6 +1654,18 @@ def deploy_pages():
                     'stdout': result.stdout[:500] if result.stdout else None
                 }), 500
             
+            # Check if build script exists
+            scripts = pkg.get("scripts", {})
+            if "build" not in scripts:
+                print(f"[Pages] ⚠️ No 'build' script found in package.json", flush=True)
+                print(f"[Pages] Available scripts: {list(scripts.keys())}", flush=True)
+                # Try to proceed anyway - some frameworks might not need explicit build
+                if output_dir == "dist" and not os.path.exists(os.path.join(temp_dir, output_dir)):
+                    return jsonify({
+                        'error': 'No build script found in package.json and no build output directory exists. Please add a "build" script to package.json.',
+                        'available_scripts': list(scripts.keys())
+                    }), 500
+            
             # Run build
             print(f"[Pages] Running npm run build...", flush=True)
             result = subprocess.run(
