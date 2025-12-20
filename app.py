@@ -1587,18 +1587,28 @@ def deploy_pages():
         cf_account_id = data.get('cf_account_id')
         cf_api_token = data.get('cf_api_token')
         cf_zone_id = data.get('cf_zone_id')
-        environment = data.get('environment', 'prod')  # 'dev' or 'prod'
+        environment_input = data.get('environment', 'prod')  # 'Preview', 'preview', 'dev', or 'prod'
+        
+        # Normalize environment: accept "Preview"/"preview"/"dev" as preview, everything else as prod
+        # But preserve the original for the response
+        environment_normalized = environment_input.lower()
+        is_preview = environment_normalized in ['preview', 'dev']
+        environment_display = "Preview" if is_preview else "Production"  # Use "Preview" or "Production" for display
         
         if not project_name or not subdomain or not files:
             return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
         
+        # Store original subdomain (without "dev-" prefix) for custom_domain in Production
+        # For Preview: custom_domain will use subdomain (with "dev-" prefix)
+        # For Production: custom_domain will use original_subdomain (without "dev-" prefix)
+        original_subdomain = subdomain.replace("dev-", "", 1) if subdomain.startswith("dev-") else subdomain
+        
         # Ensure subdomain format matches environment:
-        # - Dev: should have "dev-" prefix (e.g., "dev-vibe-123")
+        # - Preview: should have "dev-" prefix (e.g., "dev-vibe-123") for project_name
         # - Prod: should NOT have "dev-" prefix (e.g., "vibe-123")
-        if environment == "dev":
+        if is_preview:
             if not subdomain.startswith("dev-"):
                 # Add "dev-" prefix if missing
-                original_subdomain = subdomain
                 subdomain = f"dev-{subdomain}"
                 print(f"[Pages] Added 'dev-' prefix to subdomain: {original_subdomain} -> {subdomain}")
             # Ensure project_name also has "dev-" prefix for consistency
@@ -1608,7 +1618,6 @@ def deploy_pages():
         else:  # prod
             if subdomain.startswith("dev-"):
                 # Remove "dev-" prefix for prod
-                original_subdomain = subdomain
                 subdomain = subdomain.replace("dev-", "", 1)
                 print(f"[Pages] Removed 'dev-' prefix from subdomain: {original_subdomain} -> {subdomain}")
             # Ensure project_name doesn't have "dev-" prefix for prod
@@ -2026,16 +2035,16 @@ def deploy_pages():
                 "duplicate", "conflict", "name is already taken"
             ]):
                 print(f"[Pages] ✅ Cloudflare Pages project already exists: {project_name} (that's OK)")
-                print(f"[Pages] Will deploy to {'preview' if environment == 'dev' else 'main'} branch")
+                print(f"[Pages] Will deploy to {'preview' if is_preview else 'main'} branch")
             else:
                 print(f"[Pages] ⚠️ Project creation failed. See output above.")
                 # Continue anyway - deployment might still work if project exists
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
-        # For dev: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
+        # For Preview: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
         # For prod: Creates/updates vibe-*.quillworks.org (Production Environment, main branch) - opened via "View Live App"
-        branch_used = "preview" if environment == "dev" else "main"
-        print(f"[Pages] Deploying to Cloudflare Pages ({environment} environment, {branch_used} branch): {project_name}")
+        branch_used = "preview" if is_preview else "main"
+        print(f"[Pages] Deploying to Cloudflare Pages ({environment_display} environment, {branch_used} branch): {project_name}")
         print(f"[Pages] Custom domain: {subdomain}.quillworks.org")
         max_retries = 3
         retry_delay = 5  # seconds
@@ -2048,11 +2057,11 @@ def deploy_pages():
                 import time
                 time.sleep(retry_delay)
             
-            # Use Cloudflare Pages Preview Environment for dev, Production for prod
+            # Use Cloudflare Pages Preview Environment for Preview, Production for prod
             # Preview deployments: Use "preview" branch (creates preview environment automatically)
             # Production deployments: Use "main" branch (production environment)
-            deployment_branch = "preview" if environment == "dev" else "main"
-            print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
+            deployment_branch = "preview" if is_preview else "main"
+            print(f"[Pages] Deploying to {environment_display} environment using branch: {deployment_branch}")
             
             # NOTE: Authentication handled via CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN env vars
             result = subprocess.run(
@@ -2085,29 +2094,51 @@ def deploy_pages():
                             break
 
                 if deployment_url:
-                    print(f"[Pages] ✅ Deployed successfully to {environment} environment: {deployment_url}")
+                    print(f"[Pages] ✅ Deployed successfully to {environment_display} environment: {deployment_url}")
                     
                     # Extract stable project URL (without deployment hash)
-                    # Format: https://0da3x230.dev-vibe-176mvke.pages.dev → https://dev-vibe-176mvke.pages.dev
+                    # For Preview: https://preview.{project}.pages.dev (e.g., https://preview.dev-vibe-177ai54uy.pages.dev)
+                    # For Production: https://{project}.pages.dev (e.g., https://vibe-177ai54uy.pages.dev) - no "dev-" prefix
                     stable_url = deployment_url
                     if '.pages.dev' in deployment_url:
-                        # Remove deployment hash if present (format: {hash}.{project}.pages.dev)
+                        # Remove deployment hash if present
+                        # Preview format: {hash}.preview.{project}.pages.dev
+                        # Production format: {hash}.{project}.pages.dev
                         parts = deployment_url.replace('https://', '').split('.')
-                        if len(parts) >= 3:  # Has format: {hash}.{project}.pages.dev
+                        if len(parts) >= 3:  # Has format: {hash}.{...}.pages.dev
                             # Check if first part looks like a hash (short alphanumeric)
                             if len(parts[0]) <= 10 and parts[0].replace('-', '').isalnum():
-                                # Reconstruct without hash: {project}.pages.dev
-                                stable_url = f"https://{'.'.join(parts[1:])}"
-                                print(f"[Pages] 📌 Stable project URL (no deployment hash): {stable_url}")
+                                # Check if second part is "preview" (for Preview environments)
+                                has_preview_subdomain = parts[1] == "preview"
+                                
+                                if has_preview_subdomain:
+                                    # Preview format: {hash}.preview.{project}.pages.dev
+                                    # Get project name (parts[2] is the project name, may include "dev-")
+                                    project_part = parts[2]
+                                    # Reconstruct: preview.{project}.pages.dev
+                                    stable_url = f"https://preview.{project_part}.pages.dev"
+                                    print(f"[Pages] 📌 Stable preview URL (no deployment hash): {stable_url}")
+                                else:
+                                    # Production format: {hash}.{project}.pages.dev
+                                    # Get project name (parts[1] is the project name, may include "dev-")
+                                    project_part = parts[1]
+                                    # Remove "dev-" prefix for Production environment
+                                    if project_part.startswith("dev-"):
+                                        project_part = project_part.replace("dev-", "", 1)
+                                    # Reconstruct: {project}.pages.dev
+                                    stable_url = f"https://{project_part}.pages.dev"
+                                    print(f"[Pages] 📌 Stable production URL (no deployment hash, no dev- prefix): {stable_url}")
                     
-                    if environment == "dev":
+                    if is_preview:
                         print(f"[Pages] Preview environment created/updated at: {deployment_url}")
                         print(f"[Pages] This is the preview environment (preview branch) - shown in iframe for coding")
                         if stable_url != deployment_url:
                             print(f"[Pages] 💡 Stable preview URL (always points to latest preview): {stable_url}")
+                        print(f"[Pages] ⏳ Note: SSL certificate provisioning may take 1-5 minutes. If you see SSL errors, wait a few minutes and try again.")
                     else:
                         print(f"[Pages] Production environment deployed at: {deployment_url}")
                         print(f"[Pages] This is the production environment (main branch) - opened via 'View Live App'")
+                        print(f"[Pages] ⏳ Note: SSL certificate provisioning may take 1-5 minutes. If you see SSL errors, wait a few minutes and try again.")
                 else:
                     print(f"[Pages] ⚠️ Deployment succeeded but couldn't parse deployment URL from output")
                     print(f"[Pages] Full output: {result.stdout[:500]}")
@@ -2135,14 +2166,17 @@ def deploy_pages():
         # deployment_url is now set in the retry loop above
         
         # Add/verify custom domain is attached to the Pages project
-        # Dev: dev-vibe-*.quillworks.org (Preview Environment, preview branch) - for coding in iframe
-        # Prod: vibe-*.quillworks.org (Production Environment, main branch) - for live app
-        custom_domain = f"{subdomain}.quillworks.org"
-        branch_used = "preview" if environment == "dev" else "main"
-        print(f"[Pages] Environment: {environment} (branch: {branch_used})")
+        # For Preview: Use subdomain (with "dev-" prefix) for custom_domain
+        # For Production: Use original_subdomain (without "dev-" prefix) for custom_domain
+        # Preview: dev-vibe-*.quillworks.org (with "dev-" prefix)
+        # Prod: vibe-*.quillworks.org (no "dev-" prefix)
+        custom_domain_subdomain = subdomain if is_preview else original_subdomain
+        custom_domain = f"{custom_domain_subdomain}.quillworks.org"
+        branch_used = "preview" if is_preview else "main"
+        print(f"[Pages] Environment: {environment_display} (branch: {branch_used})")
         print(f"[Pages] Custom domain: {custom_domain}")
         print(f"[Pages] Deployment URL: {deployment_url}")
-        print(f"[Pages] This {environment} deployment will be accessible at {custom_domain}")
+        print(f"[Pages] This {environment_display} deployment will be accessible at {custom_domain}")
         
         try:
             # Add custom domain to Pages project using Wrangler CLI ONLY
@@ -2151,8 +2185,39 @@ def deploy_pages():
             print(f"[Pages] Custom domain: {custom_domain}")
             print(f"[Pages] Project name: {project_name}")
             
-            domain_attached = False
+            # First, verify the Pages project exists before adding domain
+            # This helps prevent Error 1014 (CNAME Cross-User Banned)
+            print(f"[Pages] Verifying Pages project '{project_name}' exists before adding domain...")
             wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
+            
+            verify_result = subprocess.run(
+                [
+                    "npx", "--yes", "wrangler@latest", "pages", "project", "list", "--json"
+                ],
+                cwd=wrangler_cwd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30
+            )
+            
+            project_exists = False
+            if verify_result.returncode == 0:
+                try:
+                    projects = json.loads(verify_result.stdout)
+                    project_exists = any(p.get("name") == project_name for p in projects)
+                    if project_exists:
+                        print(f"[Pages] ✅ Verified: Pages project '{project_name}' exists in account")
+                    else:
+                        print(f"[Pages] ⚠️ Warning: Pages project '{project_name}' not found in account")
+                        print(f"[Pages] Available projects: {[p.get('name') for p in projects[:5]]}")
+                        print(f"[Pages] This may cause Error 1014 (CNAME Cross-User Banned) when adding domain")
+                except json.JSONDecodeError:
+                    print(f"[Pages] ⚠️ Could not parse project list, continuing anyway...")
+            else:
+                print(f"[Pages] ⚠️ Could not verify project list (exit code {verify_result.returncode}), continuing anyway...")
+            
+            domain_attached = False
             
             print(f"[Pages] Running: wrangler pages domain add {custom_domain} --project-name {project_name}")
             domain_result = subprocess.run(
@@ -2172,12 +2237,33 @@ def deploy_pages():
                 print(f"[Pages] ✅ Custom domain added via Wrangler: {custom_domain}")
                 domain_attached = True
             else:
-                error_output = (domain_result.stderr or domain_result.stdout or "").lower()
-                if any(phrase in error_output for phrase in ["already", "already exists", "already configured"]):
+                error_output = (domain_result.stderr or domain_result.stdout or "")
+                error_output_lower = error_output.lower()
+                
+                # Check for "already exists" - this is success
+                if any(phrase in error_output_lower for phrase in ["already", "already exists", "already configured"]):
                     print(f"[Pages] ✅ Custom domain already attached (that's OK)")
                     domain_attached = True
+                # Check for Cloudflare Error 1014: CNAME Cross-User Banned
+                elif "1014" in error_output or "cname cross-user banned" in error_output_lower or "cross-user" in error_output_lower:
+                    print(f"[Pages] ❌ Error 1014: CNAME Cross-User Banned")
+                    print(f"[Pages] This error occurs when:")
+                    print(f"[Pages]   1. The DNS CNAME record conflicts with an existing record")
+                    print(f"[Pages]   2. The Pages project doesn't exist in the current Cloudflare account")
+                    print(f"[Pages]   3. There's a DNS record pointing to a different account's resource")
+                    if not project_exists:
+                        print(f"[Pages] ⚠️ CRITICAL: Pages project '{project_name}' was NOT found in your account!")
+                        print(f"[Pages] ⚠️ This is likely the root cause of Error 1014.")
+                    print(f"[Pages] Troubleshooting steps:")
+                    print(f"[Pages]   1. Verify the Pages project '{project_name}' exists in your Cloudflare account")
+                    print(f"[Pages]   2. Check Cloudflare DNS for existing CNAME records for {custom_domain}")
+                    print(f"[Pages]   3. Remove any conflicting DNS records in Cloudflare Dashboard")
+                    print(f"[Pages]   4. Wait a few minutes for DNS to propagate, then try again")
+                    print(f"[Pages]   5. Or manually add the domain in Cloudflare Dashboard:")
+                    print(f"[Pages]      https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
+                    print(f"[Pages] Full error: {error_output[:1000]}")
                 else:
-                    print(f"[Pages] ⚠️ Wrangler failed to attach domain: {domain_result.stderr[:500] if domain_result.stderr else domain_result.stdout[:500]}")
+                    print(f"[Pages] ⚠️ Wrangler failed to attach domain: {error_output[:500]}")
             
             if not domain_attached:
                 print(f"[Pages] ⚠️ Could not attach domain automatically, but deployment succeeded")
@@ -2193,20 +2279,22 @@ def deploy_pages():
             traceback.print_exc()
         
         # Return deployment information
-        # For dev: returns dev-vibe-*.pages.dev URL and dev-vibe-*.quillworks.org custom domain
-        # For prod: returns vibe-*.pages.dev URL and vibe-*.quillworks.org custom domain
-        # url: The deployment-specific URL with hash (for this specific deployment)
-        # stable_url: The project URL without hash (always points to latest for that branch)
+        # For Preview: returns preview.dev-vibe-*.pages.dev URL and dev-vibe-*.quillworks.org custom domain
+        # For Production: returns vibe-*.pages.dev URL and vibe-*.quillworks.org custom domain
+        # deployment_url: The deployment-specific URL with hash (e.g., https://029820d1.preview.dev-vibe-177ai54uy.pages.dev)
+        # stable_url: The project URL without hash (e.g., https://preview.dev-vibe-177ai54uy.pages.dev for Preview, https://vibe-177ai54uy.pages.dev for Production)
+        # live_preview_url: For Preview environments, use deployment_url (specific deployment). For Production, use stable_url.
         return jsonify({
             "success": True,
-            "url": stable_url or deployment_url,  # Prefer stable URL (without deployment hash)
-            "deployment_url": deployment_url,  # Deployment-specific URL with hash
-            "stable_url": stable_url,  # Stable project URL (no hash, always latest)
+            "url": stable_url or deployment_url,  # Prefer stable URL (without deployment hash) for general use
+            "deployment_url": deployment_url,  # Deployment-specific URL with hash (e.g., https://029820d1.dev-vibe-177ai54uy.pages.dev)
+            "stable_url": stable_url,  # Stable project URL (no hash, always points to latest for that branch)
+            "live_preview_url": deployment_url if is_preview else (stable_url or deployment_url),  # Use deployment URL for Preview live preview (specific deployment), stable for Production
             "project_name": project_name,
             "custom_domain": custom_domain,  # Custom domain (e.g., dev-vibe-*.quillworks.org or vibe-*.quillworks.org)
-            "environment": environment,  # 'dev' or 'prod'
-            "pages_dev_url": stable_url or deployment_url if environment == "dev" else None,  # Stable dev URL
-            "pages_prod_url": stable_url or deployment_url if environment == "prod" else None,  # Stable prod URL
+            "environment": environment_display,  # 'Preview' or 'Production'
+            "pages_preview_url": stable_url or deployment_url if is_preview else None,  # Stable Preview URL
+            "pages_prod_url": stable_url or deployment_url if not is_preview else None,  # Stable Production URL
             "custom_domain_url": f"https://{custom_domain}"  # Full custom domain URL
         })
         
@@ -2254,6 +2342,32 @@ def attach_domain():
         # Use home directory or temp for Wrangler (doesn't need project files)
         wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
         
+        # First, verify the Pages project exists
+        print(f"[Pages] Verifying Pages project '{project_name}' exists...")
+        verify_result = subprocess.run(
+            [
+                "npx", "--yes", "wrangler@latest", "pages", "project", "list", "--json"
+            ],
+            cwd=wrangler_cwd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30
+        )
+        
+        project_exists = False
+        if verify_result.returncode == 0:
+            try:
+                projects = json.loads(verify_result.stdout)
+                project_exists = any(p.get("name") == project_name for p in projects)
+                if not project_exists:
+                    print(f"[Pages] ⚠️ Warning: Pages project '{project_name}' not found in account")
+                    print(f"[Pages] Available projects: {[p.get('name') for p in projects]}")
+            except json.JSONDecodeError:
+                print(f"[Pages] ⚠️ Could not parse project list, continuing anyway...")
+        else:
+            print(f"[Pages] ⚠️ Could not verify project list, continuing anyway...")
+        
         # NOTE: wrangler pages domain add doesn't support --account-id
         # Authentication is handled via CLOUDFLARE_ACCOUNT_ID env var
         result = subprocess.run(
@@ -2276,22 +2390,44 @@ def attach_domain():
                 'command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}'
             })
         else:
-            error_output = (result.stderr or result.stdout or "").lower()
-            if any(phrase in error_output for phrase in ["already", "already exists", "already configured", "is already"]):
+            error_output = result.stderr or result.stdout or ""
+            error_output_lower = error_output.lower()
+            
+            if any(phrase in error_output_lower for phrase in ["already", "already exists", "already configured", "is already"]):
                 return jsonify({
                     'success': True,
                     'message': f'Custom domain {custom_domain} already attached',
                     'method': 'wrangler'
                 })
+            elif "1014" in error_output or "cname cross-user banned" in error_output_lower or "cross-user" in error_output_lower:
+                # Cloudflare Error 1014: CNAME Cross-User Banned
+                return jsonify({
+                    'success': False,
+                    'error': 'Error 1014: CNAME Cross-User Banned',
+                    'error_code': '1014',
+                    'explanation': 'This error occurs when the DNS CNAME record conflicts with an existing record, or the Pages project doesn\'t exist in the current Cloudflare account',
+                    'troubleshooting': [
+                        f"Verify the Pages project '{project_name}' exists in your Cloudflare account",
+                        f"Check Cloudflare DNS for existing CNAME records for {custom_domain}",
+                        "Remove any conflicting DNS records in Cloudflare Dashboard",
+                        "Wait a few minutes for DNS to propagate, then try again",
+                        f"Or manually add the domain: https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains"
+                    ],
+                    'wrangler_error': error_output[:1000],
+                    'manual_command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}',
+                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
+                    'project_exists': project_exists
+                }), 500
             else:
                 # Return detailed error with command to run manually
-                full_error = (result.stderr or result.stdout or "")[:1000]
+                full_error = error_output[:1000]
                 return jsonify({
                     'success': False,
                     'error': f'Wrangler failed to attach domain',
                     'wrangler_error': full_error,
                     'manual_command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}',
-                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains'
+                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
+                    'project_exists': project_exists
                 }), 500
         
     except Exception as e:
