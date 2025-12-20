@@ -1571,7 +1571,7 @@ def deploy_pages():
         
         # Create temp directory for project files
         temp_dir = tempfile.mkdtemp(prefix=f"pages-{project_name}-")
-        print(f"[Pages] Created temp dir: {temp_dir}")
+        print(f"[Pages] Created temp dir: {temp_dir}", flush=True)
         
         # Write all files to temp directory
         for file in files:
@@ -1580,7 +1580,7 @@ def deploy_pages():
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(file.get('content', ''))
         
-        print(f"[Pages] Wrote {len(files)} files")
+        print(f"[Pages] Wrote {len(files)} files", flush=True)
         
         # Set environment variables for Wrangler
         env = os.environ.copy()
@@ -1606,7 +1606,7 @@ def deploy_pages():
                 output_dir = "dist"
             
             # Install dependencies
-            print(f"[Pages] Running npm install...")
+            print(f"[Pages] Running npm install...", flush=True)
             result = subprocess.run(
                 ["npm", "install", "--legacy-peer-deps"],
                 cwd=temp_dir,
@@ -1616,11 +1616,11 @@ def deploy_pages():
                 timeout=300  # 5 min timeout
             )
             if result.returncode != 0:
-                print(f"[Pages] npm install failed: {result.stderr}")
+                print(f"[Pages] npm install failed: {result.stderr}", flush=True)
                 return jsonify({'error': f'npm install failed: {result.stderr[:500]}'}), 500
             
             # Run build
-            print(f"[Pages] Running npm run build...")
+            print(f"[Pages] Running npm run build...", flush=True)
             result = subprocess.run(
                 ["npm", "run", "build"],
                 cwd=temp_dir,
@@ -1630,7 +1630,7 @@ def deploy_pages():
                 timeout=300
             )
             if result.returncode != 0:
-                print(f"[Pages] Build failed: {result.stderr}")
+                print(f"[Pages] Build failed: {result.stderr}", flush=True)
                 return jsonify({'error': f'Build failed: {result.stderr[:500]}'}), 500
         
         # Check if output directory exists
@@ -1638,10 +1638,10 @@ def deploy_pages():
         if not os.path.exists(build_path):
             # Fall back to current directory if build output doesn't exist
             build_path = temp_dir
-            print(f"[Pages] No {output_dir} directory, using project root")
+            print(f"[Pages] No {output_dir} directory, using project root", flush=True)
         
         # Create the Pages project first (if it doesn't exist)
-        print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
+        print(f"[Pages] Creating Cloudflare Pages project: {project_name}", flush=True)
         result = subprocess.run(
             [
                 "npx", "wrangler", "pages", "project", "create", project_name,
@@ -1655,10 +1655,10 @@ def deploy_pages():
         )
         # Ignore error if project already exists
         if result.returncode != 0 and "already exists" not in result.stderr.lower():
-            print(f"[Pages] Project creation output: {result.stderr}")
+            print(f"[Pages] Project creation output: {result.stderr}", flush=True)
         
         # Deploy to Cloudflare Pages using Wrangler
-        print(f"[Pages] Deploying to Cloudflare Pages: {project_name}")
+        print(f"[Pages] Deploying to Cloudflare Pages: {project_name}", flush=True)
         result = subprocess.run(
             [
                 "npx", "wrangler", "pages", "deploy", build_path,
@@ -1674,7 +1674,7 @@ def deploy_pages():
         )
         
         if result.returncode != 0:
-            print(f"[Pages] Wrangler deploy failed: {result.stderr}")
+            print(f"[Pages] Wrangler deploy failed: {result.stderr}", flush=True)
             return jsonify({'error': f'Wrangler deploy failed: {result.stderr[:500]}'}), 500
         
         # Parse deployment URL from output
@@ -1684,7 +1684,7 @@ def deploy_pages():
                 deployment_url = line.strip()
                 break
         
-        print(f"[Pages] ✅ Deployed successfully: {deployment_url}")
+        print(f"[Pages] ✅ Deployed successfully: {deployment_url}", flush=True)
         
         # Add custom domain to the Pages project
         custom_domain = f"{subdomain}.quillworks.org"
@@ -1693,14 +1693,14 @@ def deploy_pages():
         api_token = env.get("CLOUDFLARE_API_TOKEN")
         account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
         
-        print(f"[Pages] Adding custom domain: {custom_domain}")
-        print(f"[Pages] Project name: {project_name}")
-        print(f"[Pages] Account ID: {account_id[:8]}..." if account_id else "[Pages] Account ID: None")
+        print(f"[Pages] Adding custom domain: {custom_domain}", flush=True)
+        print(f"[Pages] Project name: {project_name}", flush=True)
+        print(f"[Pages] Account ID: {account_id[:8]}..." if account_id else "[Pages] Account ID: None", flush=True)
         
         try:
             # Add custom domain via Cloudflare API
             api_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains"
-            print(f"[Pages] API URL: {api_url}")
+            print(f"[Pages] API URL: {api_url}", flush=True)
             
             domain_response = req.post(
                 api_url,
@@ -1712,15 +1712,15 @@ def deploy_pages():
                 timeout=30
             )
             
-            print(f"[Pages] Custom domain response: {domain_response.status_code}")
-            print(f"[Pages] Response body: {domain_response.text}")
+            print(f"[Pages] Custom domain response: {domain_response.status_code}", flush=True)
+            print(f"[Pages] Response body: {domain_response.text}", flush=True)
             
             if domain_response.status_code in [200, 201]:
-                print(f"[Pages] ✅ Custom domain added: {custom_domain}")
+                print(f"[Pages] ✅ Custom domain added: {custom_domain}", flush=True)
             elif domain_response.status_code == 409:
-                print(f"[Pages] Custom domain already exists: {custom_domain}")
+                print(f"[Pages] Custom domain already exists: {custom_domain}", flush=True)
             else:
-                print(f"[Pages] ⚠️ Failed to add custom domain: {domain_response.status_code}")
+                print(f"[Pages] ⚠️ Failed to add custom domain: {domain_response.status_code}", flush=True)
         except Exception as domain_err:
             print(f"[Pages] Warning: Could not add custom domain: {domain_err}")
             import traceback
