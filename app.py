@@ -12,7 +12,7 @@ Deploy to Railway/Render with Procfile:
 web: gunicorn app:app
 """
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from io import BytesIO
 import os
 import json
@@ -2602,6 +2602,1772 @@ def attach_domain():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# =============================================================================
+# PYTHON PROJECT DEPLOYMENT (Flask/Django/FastAPI)
+# =============================================================================
+
+# Track running Python projects: {project_id: {process, port, type, created_at}}
+RUNNING_PYTHON_PROJECTS = {}
+PYTHON_PORT_START = 9000  # Start assigning ports from 9000
+
+def get_next_available_port():
+    """Get the next available port for a Python project."""
+    used_ports = {p['port'] for p in RUNNING_PYTHON_PROJECTS.values()}
+    port = PYTHON_PORT_START
+    while port in used_ports:
+        port += 1
+    return port
+
+def cleanup_stopped_projects():
+    """Clean up projects whose processes have stopped."""
+    to_remove = []
+    for project_id, info in RUNNING_PYTHON_PROJECTS.items():
+        if info['process'].poll() is not None:  # Process has terminated
+            to_remove.append(project_id)
+            # Clean up temp directory
+            if os.path.exists(info.get('temp_dir', '')):
+                try:
+                    shutil.rmtree(info['temp_dir'])
+                except:
+                    pass
+    for project_id in to_remove:
+        del RUNNING_PYTHON_PROJECTS[project_id]
+
+@app.route('/deploy-python', methods=['POST'])
+def deploy_python_project():
+    """
+    Deploy a Python project (Flask/Django/FastAPI).
+    
+    Expects JSON with:
+    - project_id: Unique project identifier
+    - framework: "flask" | "django" | "fastapi"
+    - files: Array of {path, content} objects
+    """
+    cleanup_stopped_projects()
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+    
+    project_id = data.get('project_id')
+    framework = data.get('framework', 'flask').lower()
+    files = data.get('files', [])
+    
+    if not project_id:
+        return jsonify({'error': 'project_id is required'}), 400
+    
+    if not files:
+        return jsonify({'error': 'No files provided'}), 400
+    
+    if framework not in ['flask', 'django', 'fastapi']:
+        return jsonify({'error': f'Unsupported framework: {framework}. Use flask, django, or fastapi'}), 400
+    
+    print(f"[Python Deploy] Starting deployment for project {project_id} ({framework})")
+    print(f"[Python Deploy] Received {len(files)} files")
+    
+    # Stop existing project if running
+    if project_id in RUNNING_PYTHON_PROJECTS:
+        old_info = RUNNING_PYTHON_PROJECTS[project_id]
+        try:
+            old_info['process'].terminate()
+            old_info['process'].wait(timeout=5)
+        except:
+            old_info['process'].kill()
+        if os.path.exists(old_info.get('temp_dir', '')):
+            try:
+                shutil.rmtree(old_info['temp_dir'])
+            except:
+                pass
+        del RUNNING_PYTHON_PROJECTS[project_id]
+        print(f"[Python Deploy] Stopped existing project {project_id}")
+    
+    # Create temp directory for project
+    temp_dir = tempfile.mkdtemp(prefix=f'python-{project_id}-')
+    print(f"[Python Deploy] Created temp dir: {temp_dir}")
+    
+    try:
+        # Write all files
+        for file_info in files:
+            file_path = file_info.get('path', '')
+            content = file_info.get('content', '')
+            
+            if not file_path:
+                continue
+            
+            # Normalize path and create directories
+            file_path = file_path.lstrip('/')
+            full_path = os.path.join(temp_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        
+        print(f"[Python Deploy] Wrote {len(files)} files")
+        
+        # Create virtual environment
+        print(f"[Python Deploy] Creating virtual environment...")
+        venv_path = os.path.join(temp_dir, 'venv')
+        venv_result = subprocess.run(
+            ['python3', '-m', 'venv', venv_path],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if venv_result.returncode != 0:
+            print(f"[Python Deploy] venv creation failed: {venv_result.stderr}")
+            return jsonify({'error': f'Failed to create virtual environment: {venv_result.stderr}'}), 500
+        
+        # Determine pip and python paths
+        if os.name == 'nt':  # Windows
+            pip_path = os.path.join(venv_path, 'Scripts', 'pip')
+            python_path = os.path.join(venv_path, 'Scripts', 'python')
+        else:  # Unix
+            pip_path = os.path.join(venv_path, 'bin', 'pip')
+            python_path = os.path.join(venv_path, 'bin', 'python')
+        
+        # Install requirements if exists
+        requirements_path = os.path.join(temp_dir, 'requirements.txt')
+        if os.path.exists(requirements_path):
+            print(f"[Python Deploy] Installing requirements...")
+            install_result = subprocess.run(
+                [pip_path, 'install', '-r', 'requirements.txt', '--quiet'],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minutes for installation
+            )
+            
+            if install_result.returncode != 0:
+                print(f"[Python Deploy] pip install failed: {install_result.stderr}")
+                return jsonify({'error': f'Failed to install requirements: {install_result.stderr[:500]}'}), 500
+            
+            print(f"[Python Deploy] Requirements installed successfully")
+        else:
+            # Install framework if no requirements.txt
+            framework_packages = {
+                'flask': 'flask',
+                'django': 'django',
+                'fastapi': 'fastapi uvicorn'
+            }
+            print(f"[Python Deploy] No requirements.txt, installing {framework}...")
+            subprocess.run(
+                [pip_path, 'install'] + framework_packages[framework].split(),
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+        
+        # Get port for this project
+        port = get_next_available_port()
+        print(f"[Python Deploy] Assigned port {port}")
+        
+        # Determine start command based on framework
+        if framework == 'flask':
+            # Look for app.py or main.py
+            entry_file = 'app.py' if os.path.exists(os.path.join(temp_dir, 'app.py')) else 'main.py'
+            cmd = [python_path, '-m', 'flask', 'run', '--host=0.0.0.0', f'--port={port}']
+            env = {**os.environ, 'FLASK_APP': entry_file, 'FLASK_ENV': 'development'}
+        elif framework == 'django':
+            cmd = [python_path, 'manage.py', 'runserver', f'0.0.0.0:{port}']
+            env = {**os.environ}
+        elif framework == 'fastapi':
+            # Look for main.py or app.py
+            entry_file = 'main' if os.path.exists(os.path.join(temp_dir, 'main.py')) else 'app'
+            cmd = [python_path, '-m', 'uvicorn', f'{entry_file}:app', '--host', '0.0.0.0', '--port', str(port)]
+            env = {**os.environ}
+        
+        print(f"[Python Deploy] Starting with command: {' '.join(cmd)}")
+        
+        # Start the process
+        process = subprocess.Popen(
+            cmd,
+            cwd=temp_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Give it a moment to start
+        import time
+        time.sleep(2)
+        
+        # Check if process is still running
+        if process.poll() is not None:
+            # Process died, get error
+            stdout, stderr = process.communicate()
+            error_msg = stderr.decode() if stderr else stdout.decode() if stdout else "Unknown error"
+            print(f"[Python Deploy] Process failed to start: {error_msg}")
+            shutil.rmtree(temp_dir)
+            return jsonify({'error': f'Failed to start {framework} app: {error_msg[:500]}'}), 500
+        
+        # Store project info
+        RUNNING_PYTHON_PROJECTS[project_id] = {
+            'process': process,
+            'port': port,
+            'framework': framework,
+            'temp_dir': temp_dir,
+            'created_at': time.time()
+        }
+        
+        # Build the URL
+        # On Railway, we need to use the internal URL or expose via main app
+        railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+        if railway_url:
+            project_url = f"https://{railway_url}/python-app/{project_id}"
+        else:
+            project_url = f"http://localhost:{port}"
+        
+        print(f"[Python Deploy] ✅ Project {project_id} started on port {port}")
+        print(f"[Python Deploy] URL: {project_url}")
+        
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'framework': framework,
+            'port': port,
+            'url': project_url,
+            'internal_url': f'http://localhost:{port}',
+            'message': f'{framework.title()} app started successfully'
+        })
+        
+    except Exception as e:
+        print(f"[Python Deploy] Error: {e}")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/python-app/<project_id>', defaults={'path': ''})
+@app.route('/python-app/<project_id>/<path:path>')
+def proxy_python_app(project_id, path):
+    """Proxy requests to running Python projects."""
+    cleanup_stopped_projects()
+    
+    if project_id not in RUNNING_PYTHON_PROJECTS:
+        return jsonify({'error': f'Project {project_id} not found or not running'}), 404
+    
+    project_info = RUNNING_PYTHON_PROJECTS[project_id]
+    port = project_info['port']
+    
+    # Build target URL
+    target_url = f'http://localhost:{port}/{path}'
+    if request.query_string:
+        target_url += f'?{request.query_string.decode()}'
+    
+    try:
+        # Forward the request
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=30
+        )
+        
+        # Build response
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
+        
+        return Response(resp.content, resp.status_code, headers)
+        
+    except requests.exceptions.ConnectionError:
+        return jsonify({'error': 'Failed to connect to Python app. It may still be starting.'}), 503
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/stop-python/<project_id>', methods=['POST', 'DELETE'])
+def stop_python_project(project_id):
+    """Stop a running Python project."""
+    if project_id not in RUNNING_PYTHON_PROJECTS:
+        return jsonify({'error': f'Project {project_id} not found'}), 404
+    
+    project_info = RUNNING_PYTHON_PROJECTS[project_id]
+    
+    try:
+        project_info['process'].terminate()
+        project_info['process'].wait(timeout=5)
+    except:
+        project_info['process'].kill()
+    
+    # Clean up temp directory
+    if os.path.exists(project_info.get('temp_dir', '')):
+        try:
+            shutil.rmtree(project_info['temp_dir'])
+        except:
+            pass
+    
+    del RUNNING_PYTHON_PROJECTS[project_id]
+    
+    print(f"[Python Deploy] Stopped project {project_id}")
+    
+    return jsonify({
+        'success': True,
+        'message': f'Project {project_id} stopped'
+    })
+
+
+@app.route('/python-projects', methods=['GET'])
+def list_python_projects():
+    """List all running Python projects."""
+    cleanup_stopped_projects()
+    
+    import time
+    projects = []
+    for project_id, info in RUNNING_PYTHON_PROJECTS.items():
+        projects.append({
+            'project_id': project_id,
+            'framework': info['framework'],
+            'port': info['port'],
+            'uptime_seconds': int(time.time() - info['created_at']),
+            'status': 'running' if info['process'].poll() is None else 'stopped'
+        })
+    
+    return jsonify({
+        'projects': projects,
+        'count': len(projects)
+    })
+
+
+# =============================================================================
+# PHP/LARAVEL PROJECT DEPLOYMENT
+# =============================================================================
+
+# Track running PHP projects: {project_id: {process, port, type, created_at}}
+RUNNING_PHP_PROJECTS = {}
+PHP_PORT_START = 9500  # PHP projects start from port 9500
+
+def check_php_available():
+    """Check if PHP is installed and available."""
+    try:
+        result = subprocess.run(['php', '--version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def check_composer_available():
+    """Check if Composer is installed and available."""
+    try:
+        result = subprocess.run(['composer', '--version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def get_next_php_port():
+    """Get the next available port for a PHP project."""
+    used_ports = {p['port'] for p in RUNNING_PHP_PROJECTS.values()}
+    port = PHP_PORT_START
+    while port in used_ports:
+        port += 1
+    return port
+
+def cleanup_stopped_php_projects():
+    """Clean up PHP projects whose processes have stopped."""
+    to_remove = []
+    for project_id, info in RUNNING_PHP_PROJECTS.items():
+        if info['process'].poll() is not None:
+            to_remove.append(project_id)
+            if os.path.exists(info.get('temp_dir', '')):
+                try:
+                    shutil.rmtree(info['temp_dir'])
+                except:
+                    pass
+    for project_id in to_remove:
+        del RUNNING_PHP_PROJECTS[project_id]
+
+@app.route('/deploy-php', methods=['POST'])
+def deploy_php_project():
+    """
+    Deploy a PHP project (Laravel/vanilla PHP).
+    
+    Expects JSON with:
+    - project_id: Unique project identifier
+    - framework: "laravel" | "php"
+    - files: Array of {path, content} objects
+    """
+    cleanup_stopped_php_projects()
+    
+    # Check PHP availability
+    if not check_php_available():
+        return jsonify({
+            'error': 'PHP is not installed on this server',
+            'setup_instructions': '''
+To enable PHP support, add to your Railway service:
+1. Create a Dockerfile with PHP installed
+2. Or use Railway's PHP template
+3. Or install PHP via nixpacks.toml:
+   [phases.setup]
+   nixPkgs = ["php82", "php82Packages.composer"]
+'''
+        }), 503
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+    
+    project_id = data.get('project_id')
+    framework = data.get('framework', 'php').lower()
+    files = data.get('files', [])
+    
+    if not project_id:
+        return jsonify({'error': 'project_id is required'}), 400
+    
+    if not files:
+        return jsonify({'error': 'No files provided'}), 400
+    
+    if framework not in ['laravel', 'php']:
+        return jsonify({'error': f'Unsupported framework: {framework}. Use laravel or php'}), 400
+    
+    print(f"[PHP Deploy] Starting deployment for project {project_id} ({framework})")
+    print(f"[PHP Deploy] Received {len(files)} files")
+    
+    # Stop existing project if running
+    if project_id in RUNNING_PHP_PROJECTS:
+        old_info = RUNNING_PHP_PROJECTS[project_id]
+        try:
+            old_info['process'].terminate()
+            old_info['process'].wait(timeout=5)
+        except:
+            old_info['process'].kill()
+        if os.path.exists(old_info.get('temp_dir', '')):
+            try:
+                shutil.rmtree(old_info['temp_dir'])
+            except:
+                pass
+        del RUNNING_PHP_PROJECTS[project_id]
+        print(f"[PHP Deploy] Stopped existing project {project_id}")
+    
+    # Create temp directory for project
+    temp_dir = tempfile.mkdtemp(prefix=f'php-{project_id}-')
+    print(f"[PHP Deploy] Created temp dir: {temp_dir}")
+    
+    try:
+        # Write all files
+        for file_info in files:
+            file_path = file_info.get('path', '')
+            content = file_info.get('content', '')
+            
+            if not file_path:
+                continue
+            
+            file_path = file_path.lstrip('/')
+            full_path = os.path.join(temp_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        
+        print(f"[PHP Deploy] Wrote {len(files)} files")
+        
+        # Install Composer dependencies if composer.json exists
+        composer_json = os.path.join(temp_dir, 'composer.json')
+        if os.path.exists(composer_json) and check_composer_available():
+            print(f"[PHP Deploy] Installing Composer dependencies...")
+            install_result = subprocess.run(
+                ['composer', 'install', '--no-interaction', '--prefer-dist'],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if install_result.returncode != 0:
+                print(f"[PHP Deploy] Composer install failed: {install_result.stderr}")
+                # Continue anyway - some projects might not need all dependencies
+        
+        # Get port for this project
+        port = get_next_php_port()
+        print(f"[PHP Deploy] Assigned port {port}")
+        
+        # Determine document root and start command
+        if framework == 'laravel':
+            # Laravel uses public/ as document root
+            doc_root = os.path.join(temp_dir, 'public')
+            if not os.path.exists(doc_root):
+                doc_root = temp_dir
+            
+            # Run Laravel artisan serve if available
+            artisan_path = os.path.join(temp_dir, 'artisan')
+            if os.path.exists(artisan_path):
+                cmd = ['php', 'artisan', 'serve', '--host=0.0.0.0', f'--port={port}']
+                cwd = temp_dir
+            else:
+                cmd = ['php', '-S', f'0.0.0.0:{port}', '-t', 'public']
+                cwd = temp_dir
+        else:
+            # Vanilla PHP - use built-in server
+            cmd = ['php', '-S', f'0.0.0.0:{port}']
+            cwd = temp_dir
+        
+        print(f"[PHP Deploy] Starting with command: {' '.join(cmd)}")
+        
+        # Start the process
+        process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Give it a moment to start
+        import time
+        time.sleep(2)
+        
+        # Check if process is still running
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            error_msg = stderr.decode() if stderr else stdout.decode() if stdout else "Unknown error"
+            print(f"[PHP Deploy] Process failed to start: {error_msg}")
+            shutil.rmtree(temp_dir)
+            return jsonify({'error': f'Failed to start {framework} app: {error_msg[:500]}'}), 500
+        
+        # Store project info
+        RUNNING_PHP_PROJECTS[project_id] = {
+            'process': process,
+            'port': port,
+            'framework': framework,
+            'temp_dir': temp_dir,
+            'created_at': time.time()
+        }
+        
+        # Build the URL
+        railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+        if railway_url:
+            project_url = f"https://{railway_url}/php-app/{project_id}"
+        else:
+            project_url = f"http://localhost:{port}"
+        
+        print(f"[PHP Deploy] ✅ Project {project_id} started on port {port}")
+        print(f"[PHP Deploy] URL: {project_url}")
+        
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'framework': framework,
+            'port': port,
+            'url': project_url,
+            'internal_url': f'http://localhost:{port}',
+            'message': f'{framework.title()} app started successfully'
+        })
+        
+    except Exception as e:
+        print(f"[PHP Deploy] Error: {e}")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/php-app/<project_id>', defaults={'path': ''})
+@app.route('/php-app/<project_id>/<path:path>')
+def proxy_php_app(project_id, path):
+    """Proxy requests to running PHP projects."""
+    cleanup_stopped_php_projects()
+    
+    if project_id not in RUNNING_PHP_PROJECTS:
+        return jsonify({'error': f'PHP project {project_id} not found or not running'}), 404
+    
+    project_info = RUNNING_PHP_PROJECTS[project_id]
+    port = project_info['port']
+    
+    target_url = f'http://localhost:{port}/{path}'
+    if request.query_string:
+        target_url += f'?{request.query_string.decode()}'
+    
+    try:
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=30
+        )
+        
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
+        
+        return Response(resp.content, resp.status_code, headers)
+        
+    except requests.exceptions.ConnectionError:
+        return jsonify({'error': 'Failed to connect to PHP app. It may still be starting.'}), 503
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/stop-php/<project_id>', methods=['POST', 'DELETE'])
+def stop_php_project(project_id):
+    """Stop a running PHP project."""
+    if project_id not in RUNNING_PHP_PROJECTS:
+        return jsonify({'error': f'PHP project {project_id} not found'}), 404
+    
+    project_info = RUNNING_PHP_PROJECTS[project_id]
+    
+    try:
+        project_info['process'].terminate()
+        project_info['process'].wait(timeout=5)
+    except:
+        project_info['process'].kill()
+    
+    if os.path.exists(project_info.get('temp_dir', '')):
+        try:
+            shutil.rmtree(project_info['temp_dir'])
+        except:
+            pass
+    
+    del RUNNING_PHP_PROJECTS[project_id]
+    
+    print(f"[PHP Deploy] Stopped project {project_id}")
+    
+    return jsonify({
+        'success': True,
+        'message': f'PHP project {project_id} stopped'
+    })
+
+
+@app.route('/php-projects', methods=['GET'])
+def list_php_projects():
+    """List all running PHP projects."""
+    cleanup_stopped_php_projects()
+    
+    import time
+    projects = []
+    for project_id, info in RUNNING_PHP_PROJECTS.items():
+        projects.append({
+            'project_id': project_id,
+            'framework': info['framework'],
+            'port': info['port'],
+            'uptime_seconds': int(time.time() - info['created_at']),
+            'status': 'running' if info['process'].poll() is None else 'stopped'
+        })
+    
+    return jsonify({
+        'projects': projects,
+        'count': len(projects)
+    })
+
+
+# =============================================================================
+# RUST PROJECT DEPLOYMENT
+# =============================================================================
+
+# Track running Rust projects: {project_id: {process, port, type, created_at}}
+RUNNING_RUST_PROJECTS = {}
+RUST_PORT_START = 10000  # Rust projects start from port 10000
+
+def check_rust_available():
+    """Check if Rust is installed and available."""
+    try:
+        result = subprocess.run(['rustc', '--version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def check_cargo_available():
+    """Check if Cargo is installed and available."""
+    try:
+        result = subprocess.run(['cargo', '--version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def check_node_available():
+    """Check if Node.js is installed and available."""
+    try:
+        result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def get_next_rust_port():
+    """Get the next available port for a Rust project."""
+    used_ports = {p['port'] for p in RUNNING_RUST_PROJECTS.values()}
+    port = RUST_PORT_START
+    while port in used_ports:
+        port += 1
+    return port
+
+def cleanup_stopped_rust_projects():
+    """Clean up Rust projects whose processes have stopped."""
+    to_remove = []
+    for project_id, info in RUNNING_RUST_PROJECTS.items():
+        if info['process'].poll() is not None:
+            to_remove.append(project_id)
+            if os.path.exists(info.get('temp_dir', '')):
+                try:
+                    shutil.rmtree(info['temp_dir'])
+                except:
+                    pass
+    for project_id in to_remove:
+        del RUNNING_RUST_PROJECTS[project_id]
+
+@app.route('/deploy-rust', methods=['POST'])
+def deploy_rust_project():
+    """
+    Deploy a Rust project (Actix-web, Axum, Rocket, etc.).
+    
+    Expects JSON with:
+    - project_id: Unique project identifier
+    - framework: "actix" | "axum" | "rocket" | "rust"
+    - files: Array of {path, content} objects
+    """
+    cleanup_stopped_rust_projects()
+    
+    # Check Rust availability
+    if not check_rust_available() or not check_cargo_available():
+        return jsonify({
+            'error': 'Rust/Cargo is not installed on this server',
+            'setup_instructions': 'Rust should be installed via the Dockerfile. Please rebuild the container.'
+        }), 503
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+    
+    project_id = data.get('project_id')
+    framework = data.get('framework', 'rust').lower()
+    files = data.get('files', [])
+    
+    if not project_id:
+        return jsonify({'error': 'project_id is required'}), 400
+    
+    if not files:
+        return jsonify({'error': 'No files provided'}), 400
+    
+    print(f"[Rust Deploy] Starting deployment for project {project_id} ({framework})")
+    print(f"[Rust Deploy] Received {len(files)} files")
+    
+    # Stop existing project if running
+    if project_id in RUNNING_RUST_PROJECTS:
+        old_info = RUNNING_RUST_PROJECTS[project_id]
+        try:
+            old_info['process'].terminate()
+            old_info['process'].wait(timeout=5)
+        except:
+            old_info['process'].kill()
+        if os.path.exists(old_info.get('temp_dir', '')):
+            try:
+                shutil.rmtree(old_info['temp_dir'])
+            except:
+                pass
+        del RUNNING_RUST_PROJECTS[project_id]
+        print(f"[Rust Deploy] Stopped existing project {project_id}")
+    
+    # Create temp directory for project
+    temp_dir = tempfile.mkdtemp(prefix=f'rust-{project_id}-')
+    print(f"[Rust Deploy] Created temp dir: {temp_dir}")
+    
+    try:
+        # Write all files
+        for file_info in files:
+            file_path = file_info.get('path', '')
+            content = file_info.get('content', '')
+            
+            if not file_path:
+                continue
+            
+            file_path = file_path.lstrip('/')
+            full_path = os.path.join(temp_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        
+        print(f"[Rust Deploy] Wrote {len(files)} files")
+        
+        # Check if Cargo.toml exists
+        cargo_toml = os.path.join(temp_dir, 'Cargo.toml')
+        if not os.path.exists(cargo_toml):
+            return jsonify({'error': 'No Cargo.toml found. This is required for Rust projects.'}), 400
+        
+        # Build the Rust project
+        print(f"[Rust Deploy] Building Rust project with cargo build --release...")
+        build_result = subprocess.run(
+            ['cargo', 'build', '--release'],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minutes for Rust compilation
+        )
+        
+        if build_result.returncode != 0:
+            print(f"[Rust Deploy] Build failed: {build_result.stderr}")
+            return jsonify({
+                'error': f'Rust build failed',
+                'stderr': build_result.stderr[:1000],
+                'stdout': build_result.stdout[:1000]
+            }), 500
+        
+        print(f"[Rust Deploy] Build completed successfully")
+        
+        # Find the built binary
+        target_dir = os.path.join(temp_dir, 'target', 'release')
+        binaries = [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f)) and os.access(os.path.join(target_dir, f), os.X_OK)]
+        
+        # Filter out common non-executable files
+        binaries = [b for b in binaries if not b.endswith('.d') and not b.endswith('.rlib') and not b.startswith('.')]
+        
+        if not binaries:
+            return jsonify({'error': 'No executable binary found after build'}), 500
+        
+        # Use the first binary (usually there's only one)
+        binary_name = binaries[0]
+        binary_path = os.path.join(target_dir, binary_name)
+        
+        print(f"[Rust Deploy] Found binary: {binary_name}")
+        
+        # Get port for this project
+        port = get_next_rust_port()
+        print(f"[Rust Deploy] Assigned port {port}")
+        
+        # Run the binary with PORT environment variable
+        env = {**os.environ, 'PORT': str(port), 'HOST': '0.0.0.0'}
+        
+        process = subprocess.Popen(
+            [binary_path],
+            cwd=temp_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Give it a moment to start
+        import time
+        time.sleep(3)
+        
+        # Check if process is still running
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            error_msg = stderr.decode() if stderr else stdout.decode() if stdout else "Unknown error"
+            print(f"[Rust Deploy] Process failed to start: {error_msg}")
+            shutil.rmtree(temp_dir)
+            return jsonify({'error': f'Failed to start Rust app: {error_msg[:500]}'}), 500
+        
+        # Store project info
+        RUNNING_RUST_PROJECTS[project_id] = {
+            'process': process,
+            'port': port,
+            'framework': framework,
+            'temp_dir': temp_dir,
+            'binary': binary_name,
+            'created_at': time.time()
+        }
+        
+        # Build the URL
+        railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+        if railway_url:
+            project_url = f"https://{railway_url}/rust-app/{project_id}"
+        else:
+            project_url = f"http://localhost:{port}"
+        
+        print(f"[Rust Deploy] ✅ Project {project_id} started on port {port}")
+        print(f"[Rust Deploy] URL: {project_url}")
+        
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'framework': framework,
+            'port': port,
+            'url': project_url,
+            'internal_url': f'http://localhost:{port}',
+            'binary': binary_name,
+            'message': f'Rust ({framework}) app started successfully'
+        })
+        
+    except subprocess.TimeoutExpired:
+        print(f"[Rust Deploy] Build timed out")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return jsonify({'error': 'Rust build timed out (10 minute limit)'}), 500
+    except Exception as e:
+        print(f"[Rust Deploy] Error: {e}")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/rust-app/<project_id>', defaults={'path': ''})
+@app.route('/rust-app/<project_id>/<path:path>')
+def proxy_rust_app(project_id, path):
+    """Proxy requests to running Rust projects."""
+    cleanup_stopped_rust_projects()
+    
+    if project_id not in RUNNING_RUST_PROJECTS:
+        return jsonify({'error': f'Rust project {project_id} not found or not running'}), 404
+    
+    project_info = RUNNING_RUST_PROJECTS[project_id]
+    port = project_info['port']
+    
+    target_url = f'http://localhost:{port}/{path}'
+    if request.query_string:
+        target_url += f'?{request.query_string.decode()}'
+    
+    try:
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=30
+        )
+        
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
+        
+        return Response(resp.content, resp.status_code, headers)
+        
+    except requests.exceptions.ConnectionError:
+        return jsonify({'error': 'Failed to connect to Rust app. It may still be starting.'}), 503
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/stop-rust/<project_id>', methods=['POST', 'DELETE'])
+def stop_rust_project(project_id):
+    """Stop a running Rust project."""
+    if project_id not in RUNNING_RUST_PROJECTS:
+        return jsonify({'error': f'Rust project {project_id} not found'}), 404
+    
+    project_info = RUNNING_RUST_PROJECTS[project_id]
+    
+    try:
+        project_info['process'].terminate()
+        project_info['process'].wait(timeout=5)
+    except:
+        project_info['process'].kill()
+    
+    if os.path.exists(project_info.get('temp_dir', '')):
+        try:
+            shutil.rmtree(project_info['temp_dir'])
+        except:
+            pass
+    
+    del RUNNING_RUST_PROJECTS[project_id]
+    
+    print(f"[Rust Deploy] Stopped project {project_id}")
+    
+    return jsonify({
+        'success': True,
+        'message': f'Rust project {project_id} stopped'
+    })
+
+
+@app.route('/rust-projects', methods=['GET'])
+def list_rust_projects():
+    """List all running Rust projects."""
+    cleanup_stopped_rust_projects()
+    
+    import time
+    projects = []
+    for project_id, info in RUNNING_RUST_PROJECTS.items():
+        projects.append({
+            'project_id': project_id,
+            'framework': info['framework'],
+            'port': info['port'],
+            'binary': info.get('binary', 'unknown'),
+            'uptime_seconds': int(time.time() - info['created_at']),
+            'status': 'running' if info['process'].poll() is None else 'stopped'
+        })
+    
+    return jsonify({
+        'projects': projects,
+        'count': len(projects)
+    })
+
+
+# =============================================================================
+# GO PROJECT DEPLOYMENT
+# =============================================================================
+
+RUNNING_GO_PROJECTS = {}  # project_id -> {process, port, framework, created_at, temp_dir}
+
+
+def check_go_available():
+    """Check if Go is available on the system."""
+    try:
+        result = subprocess.run(['go', 'version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def get_next_go_port():
+    """Get the next available port for a Go project (starts at 10000)."""
+    used_ports = {info['port'] for info in RUNNING_GO_PROJECTS.values()}
+    port = 10000
+    while port in used_ports:
+        port += 1
+    return port
+
+
+def cleanup_stopped_go_projects():
+    """Clean up any stopped Go projects."""
+    stopped = []
+    for project_id, info in RUNNING_GO_PROJECTS.items():
+        if info['process'].poll() is not None:
+            stopped.append(project_id)
+            # Clean up temp directory
+            if 'temp_dir' in info and os.path.exists(info['temp_dir']):
+                import shutil
+                shutil.rmtree(info['temp_dir'], ignore_errors=True)
+    for project_id in stopped:
+        del RUNNING_GO_PROJECTS[project_id]
+
+
+@app.route('/deploy-go', methods=['POST'])
+def deploy_go_project():
+    """Deploy a Go project."""
+    import shutil
+    
+    # Check if Go is available
+    if not check_go_available():
+        return jsonify({
+            'success': False,
+            'error': 'Go is not installed on this server',
+            'setup_instructions': 'Install Go from https://go.dev/dl/'
+        }), 500
+    
+    data = request.json
+    project_id = data.get('project_id')
+    files = data.get('files', {})
+    framework = data.get('framework', 'go')  # go, gin, echo, fiber
+    
+    if not project_id:
+        return jsonify({'success': False, 'error': 'project_id is required'}), 400
+    
+    if not files:
+        return jsonify({'success': False, 'error': 'No files provided'}), 400
+    
+    print(f"[Go Deploy] Starting deployment for project {project_id}")
+    print(f"[Go Deploy] Framework: {framework}")
+    print(f"[Go Deploy] Files: {list(files.keys())}")
+    
+    # Stop existing project if running
+    if project_id in RUNNING_GO_PROJECTS:
+        old_info = RUNNING_GO_PROJECTS[project_id]
+        try:
+            old_info['process'].terminate()
+            old_info['process'].wait(timeout=5)
+        except:
+            old_info['process'].kill()
+        if 'temp_dir' in old_info and os.path.exists(old_info['temp_dir']):
+            shutil.rmtree(old_info['temp_dir'], ignore_errors=True)
+        del RUNNING_GO_PROJECTS[project_id]
+    
+    # Create temp directory for the project
+    temp_dir = tempfile.mkdtemp(prefix=f'go_project_{project_id}_')
+    print(f"[Go Deploy] Created temp directory: {temp_dir}")
+    
+    try:
+        # Write all files
+        for file_path, content in files.items():
+            full_path = os.path.join(temp_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"[Go Deploy] Created file: {file_path}")
+        
+        # Check for go.mod
+        go_mod_path = os.path.join(temp_dir, 'go.mod')
+        if not os.path.exists(go_mod_path):
+            # Initialize go module
+            print("[Go Deploy] Initializing go module...")
+            result = subprocess.run(
+                ['go', 'mod', 'init', f'project_{project_id}'],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                print(f"[Go Deploy] go mod init output: {result.stderr}")
+        
+        # Download dependencies
+        print("[Go Deploy] Downloading dependencies...")
+        result = subprocess.run(
+            ['go', 'mod', 'tidy'],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, 'GOPATH': '/go', 'GOCACHE': '/tmp/go-cache'}
+        )
+        if result.returncode != 0:
+            print(f"[Go Deploy] go mod tidy error: {result.stderr}")
+        
+        # Build the project
+        print("[Go Deploy] Building project...")
+        binary_name = f'app_{project_id}'
+        binary_path = os.path.join(temp_dir, binary_name)
+        
+        result = subprocess.run(
+            ['go', 'build', '-o', binary_name, '.'],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env={**os.environ, 'GOPATH': '/go', 'GOCACHE': '/tmp/go-cache', 'CGO_ENABLED': '0'}
+        )
+        
+        if result.returncode != 0:
+            return jsonify({
+                'success': False,
+                'error': 'Go build failed',
+                'build_error': result.stderr,
+                'build_output': result.stdout
+            }), 400
+        
+        print(f"[Go Deploy] Build successful: {binary_path}")
+        
+        # Get port for this project
+        port = get_next_go_port()
+        
+        # Start the Go application
+        print(f"[Go Deploy] Starting Go app on port {port}...")
+        
+        env = os.environ.copy()
+        env['PORT'] = str(port)
+        env['GIN_MODE'] = 'release'  # For Gin framework
+        
+        process = subprocess.Popen(
+            [binary_path],
+            cwd=temp_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Wait a moment for startup
+        import time
+        time.sleep(2)
+        
+        # Check if process started successfully
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            return jsonify({
+                'success': False,
+                'error': 'Go application failed to start',
+                'stderr': stderr.decode('utf-8', errors='replace'),
+                'stdout': stdout.decode('utf-8', errors='replace')
+            }), 500
+        
+        # Store project info
+        RUNNING_GO_PROJECTS[project_id] = {
+            'process': process,
+            'port': port,
+            'framework': framework,
+            'binary': binary_name,
+            'temp_dir': temp_dir,
+            'created_at': time.time()
+        }
+        
+        base_url = request.host_url.rstrip('/')
+        app_url = f"{base_url}/go-app/{project_id}"
+        
+        print(f"[Go Deploy] Project {project_id} deployed successfully at {app_url}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Go project deployed successfully',
+            'project_id': project_id,
+            'port': port,
+            'app_url': app_url,
+            'framework': framework,
+            'binary': binary_name
+        })
+        
+    except Exception as e:
+        # Clean up on error
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"[Go Deploy] Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/go-app/<project_id>', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+@app.route('/go-app/<project_id>/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+def proxy_go_app(project_id, path):
+    """Proxy requests to a running Go project."""
+    if project_id not in RUNNING_GO_PROJECTS:
+        return jsonify({'error': f'Go project {project_id} not found or not running'}), 404
+    
+    info = RUNNING_GO_PROJECTS[project_id]
+    
+    # Check if process is still running
+    if info['process'].poll() is not None:
+        del RUNNING_GO_PROJECTS[project_id]
+        return jsonify({'error': f'Go project {project_id} has stopped'}), 500
+    
+    port = info['port']
+    target_url = f"http://127.0.0.1:{port}/{path}"
+    
+    try:
+        # Forward the request
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=30
+        )
+        
+        # Build response
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded_headers]
+        
+        return Response(resp.content, resp.status_code, headers)
+        
+    except requests.exceptions.ConnectionError:
+        return jsonify({'error': 'Could not connect to Go application'}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Go application timed out'}), 504
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/stop-go/<project_id>', methods=['POST'])
+def stop_go_project(project_id):
+    """Stop a running Go project."""
+    import shutil
+    
+    if project_id not in RUNNING_GO_PROJECTS:
+        return jsonify({'error': f'Go project {project_id} not found'}), 404
+    
+    info = RUNNING_GO_PROJECTS[project_id]
+    
+    # Terminate the process
+    try:
+        info['process'].terminate()
+        info['process'].wait(timeout=5)
+    except:
+        info['process'].kill()
+    
+    # Clean up temp directory
+    if 'temp_dir' in info and os.path.exists(info['temp_dir']):
+        shutil.rmtree(info['temp_dir'], ignore_errors=True)
+    
+    del RUNNING_GO_PROJECTS[project_id]
+    
+    print(f"[Go Deploy] Stopped project {project_id}")
+    
+    return jsonify({
+        'success': True,
+        'message': f'Go project {project_id} stopped'
+    })
+
+
+@app.route('/go-projects', methods=['GET'])
+def list_go_projects():
+    """List all running Go projects."""
+    cleanup_stopped_go_projects()
+    
+    import time
+    projects = []
+    for project_id, info in RUNNING_GO_PROJECTS.items():
+        projects.append({
+            'project_id': project_id,
+            'framework': info['framework'],
+            'port': info['port'],
+            'binary': info.get('binary', 'unknown'),
+            'uptime_seconds': int(time.time() - info['created_at']),
+            'status': 'running' if info['process'].poll() is None else 'stopped'
+        })
+    
+    return jsonify({
+        'projects': projects,
+        'count': len(projects)
+    })
+
+
+# =============================================================================
+# ANDROID PROJECT BUILD
+# =============================================================================
+
+BUILT_ANDROID_APKS = {}  # project_id -> {apk_path, created_at, temp_dir}
+
+
+def check_java_available():
+    """Check if Java is available on the system."""
+    try:
+        result = subprocess.run(['java', '-version'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def check_android_sdk_available():
+    """Check if Android SDK is available on the system."""
+    android_home = os.environ.get('ANDROID_HOME', '/opt/android-sdk')
+    sdkmanager = os.path.join(android_home, 'cmdline-tools', 'latest', 'bin', 'sdkmanager')
+    return os.path.exists(sdkmanager)
+
+
+def cleanup_old_android_builds():
+    """Clean up Android builds older than 1 hour."""
+    import time
+    import shutil
+    
+    expired = []
+    for project_id, info in BUILT_ANDROID_APKS.items():
+        if time.time() - info['created_at'] > 3600:  # 1 hour
+            expired.append(project_id)
+            if 'temp_dir' in info and os.path.exists(info['temp_dir']):
+                shutil.rmtree(info['temp_dir'], ignore_errors=True)
+    for project_id in expired:
+        del BUILT_ANDROID_APKS[project_id]
+
+
+@app.route('/build-android', methods=['POST'])
+def build_android_project():
+    """Build an Android APK from project files."""
+    import shutil
+    
+    # Check prerequisites
+    if not check_java_available():
+        return jsonify({
+            'success': False,
+            'error': 'Java is not installed on this server',
+            'setup_instructions': 'Install OpenJDK 17: apt-get install openjdk-17-jdk-headless'
+        }), 500
+    
+    if not check_android_sdk_available():
+        return jsonify({
+            'success': False,
+            'error': 'Android SDK is not installed on this server',
+            'setup_instructions': 'Install Android SDK command-line tools'
+        }), 500
+    
+    data = request.json
+    project_id = data.get('project_id')
+    files = data.get('files', {})
+    app_name = data.get('app_name', 'MyApp')
+    package_name = data.get('package_name', 'com.example.myapp')
+    
+    if not project_id:
+        return jsonify({'success': False, 'error': 'project_id is required'}), 400
+    
+    if not files:
+        return jsonify({'success': False, 'error': 'No files provided'}), 400
+    
+    print(f"[Android Build] Starting build for project {project_id}")
+    print(f"[Android Build] App name: {app_name}")
+    print(f"[Android Build] Package: {package_name}")
+    print(f"[Android Build] Files: {list(files.keys())}")
+    
+    # Clean up old build if exists
+    if project_id in BUILT_ANDROID_APKS:
+        old_info = BUILT_ANDROID_APKS[project_id]
+        if 'temp_dir' in old_info and os.path.exists(old_info['temp_dir']):
+            shutil.rmtree(old_info['temp_dir'], ignore_errors=True)
+        del BUILT_ANDROID_APKS[project_id]
+    
+    # Create temp directory for the project
+    temp_dir = tempfile.mkdtemp(prefix=f'android_project_{project_id}_')
+    print(f"[Android Build] Created temp directory: {temp_dir}")
+    
+    try:
+        # Write all files
+        for file_path, content in files.items():
+            full_path = os.path.join(temp_dir, file_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"[Android Build] Created file: {file_path}")
+        
+        # Check if this is a Gradle project
+        has_gradle = os.path.exists(os.path.join(temp_dir, 'build.gradle')) or \
+                     os.path.exists(os.path.join(temp_dir, 'build.gradle.kts'))
+        has_gradlew = os.path.exists(os.path.join(temp_dir, 'gradlew'))
+        
+        if not has_gradle:
+            # Create a basic Android project structure if not provided
+            print("[Android Build] No build.gradle found, creating basic project structure...")
+            create_basic_android_project(temp_dir, app_name, package_name, files)
+            has_gradlew = True  # We create gradlew
+        
+        # Make gradlew executable
+        gradlew_path = os.path.join(temp_dir, 'gradlew')
+        if os.path.exists(gradlew_path):
+            os.chmod(gradlew_path, 0o755)
+        
+        # Set up environment
+        android_home = os.environ.get('ANDROID_HOME', '/opt/android-sdk')
+        build_env = os.environ.copy()
+        build_env['ANDROID_HOME'] = android_home
+        build_env['ANDROID_SDK_ROOT'] = android_home
+        
+        # Build the APK
+        print("[Android Build] Running Gradle build...")
+        
+        if has_gradlew:
+            build_cmd = ['./gradlew', 'assembleDebug', '--no-daemon', '-q']
+        else:
+            build_cmd = ['gradle', 'assembleDebug', '--no-daemon', '-q']
+        
+        result = subprocess.run(
+            build_cmd,
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout for builds
+            env=build_env
+        )
+        
+        if result.returncode != 0:
+            print(f"[Android Build] Build failed: {result.stderr}")
+            return jsonify({
+                'success': False,
+                'error': 'Android build failed',
+                'build_error': result.stderr,
+                'build_output': result.stdout
+            }), 400
+        
+        # Find the APK
+        apk_path = None
+        for root, dirs, apk_files in os.walk(os.path.join(temp_dir, 'app', 'build', 'outputs', 'apk')):
+            for apk_file in apk_files:
+                if apk_file.endswith('.apk'):
+                    apk_path = os.path.join(root, apk_file)
+                    break
+            if apk_path:
+                break
+        
+        if not apk_path or not os.path.exists(apk_path):
+            return jsonify({
+                'success': False,
+                'error': 'APK file not found after build',
+                'build_output': result.stdout
+            }), 500
+        
+        # Get APK size
+        apk_size = os.path.getsize(apk_path)
+        
+        # Store build info
+        import time
+        BUILT_ANDROID_APKS[project_id] = {
+            'apk_path': apk_path,
+            'temp_dir': temp_dir,
+            'app_name': app_name,
+            'package_name': package_name,
+            'created_at': time.time(),
+            'apk_size': apk_size
+        }
+        
+        base_url = request.host_url.rstrip('/')
+        download_url = f"{base_url}/download-apk/{project_id}"
+        
+        print(f"[Android Build] Build successful!")
+        print(f"[Android Build] APK path: {apk_path}")
+        print(f"[Android Build] APK size: {apk_size} bytes")
+        print(f"[Android Build] Download URL: {download_url}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Android APK built successfully',
+            'project_id': project_id,
+            'download_url': download_url,
+            'apk_size': apk_size,
+            'app_name': app_name,
+            'package_name': package_name
+        })
+        
+    except subprocess.TimeoutExpired:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({
+            'success': False,
+            'error': 'Build timed out (10 minute limit exceeded)'
+        }), 500
+    except Exception as e:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"[Android Build] Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+def create_basic_android_project(temp_dir, app_name, package_name, user_files):
+    """Create a basic Android project structure for simple apps."""
+    import shutil
+    
+    package_path = package_name.replace('.', '/')
+    
+    # Create directory structure
+    os.makedirs(os.path.join(temp_dir, 'app', 'src', 'main', 'java', package_path), exist_ok=True)
+    os.makedirs(os.path.join(temp_dir, 'app', 'src', 'main', 'res', 'layout'), exist_ok=True)
+    os.makedirs(os.path.join(temp_dir, 'app', 'src', 'main', 'res', 'values'), exist_ok=True)
+    os.makedirs(os.path.join(temp_dir, 'gradle', 'wrapper'), exist_ok=True)
+    
+    # settings.gradle
+    settings_gradle = f'''pluginManagement {{
+    repositories {{
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }}
+}}
+dependencyResolutionManagement {{
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {{
+        google()
+        mavenCentral()
+    }}
+}}
+rootProject.name = "{app_name}"
+include ':app'
+'''
+    with open(os.path.join(temp_dir, 'settings.gradle'), 'w') as f:
+        f.write(settings_gradle)
+    
+    # Root build.gradle
+    root_build_gradle = '''plugins {
+    id 'com.android.application' version '8.2.0' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.0' apply false
+}
+'''
+    with open(os.path.join(temp_dir, 'build.gradle'), 'w') as f:
+        f.write(root_build_gradle)
+    
+    # App build.gradle
+    app_build_gradle = f'''plugins {{
+    id 'com.android.application'
+}}
+
+android {{
+    namespace '{package_name}'
+    compileSdk 34
+
+    defaultConfig {{
+        applicationId "{package_name}"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }}
+
+    buildTypes {{
+        release {{
+            minifyEnabled false
+        }}
+        debug {{
+            minifyEnabled false
+        }}
+    }}
+    compileOptions {{
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }}
+}}
+
+dependencies {{
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+}}
+'''
+    with open(os.path.join(temp_dir, 'app', 'build.gradle'), 'w') as f:
+        f.write(app_build_gradle)
+    
+    # AndroidManifest.xml
+    manifest = f'''<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="true"
+        android:label="{app_name}"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.DayNight">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+'''
+    with open(os.path.join(temp_dir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'w') as f:
+        f.write(manifest)
+    
+    # Check if user provided MainActivity, otherwise create default
+    has_main_activity = any('MainActivity' in f for f in user_files.keys())
+    
+    if not has_main_activity:
+        # Default MainActivity.java
+        main_activity = f'''package {package_name};
+
+import android.os.Bundle;
+import androidx.appcompat.app.AppCompatActivity;
+
+public class MainActivity extends AppCompatActivity {{
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {{
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+    }}
+}}
+'''
+        with open(os.path.join(temp_dir, 'app', 'src', 'main', 'java', package_path, 'MainActivity.java'), 'w') as f:
+            f.write(main_activity)
+    
+    # Default layout
+    has_layout = any('activity_main.xml' in f for f in user_files.keys())
+    
+    if not has_layout:
+        layout = f'''<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout 
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Hello, {app_name}!"
+        android:textSize="24sp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>
+'''
+        with open(os.path.join(temp_dir, 'app', 'src', 'main', 'res', 'layout', 'activity_main.xml'), 'w') as f:
+            f.write(layout)
+    
+    # strings.xml
+    strings = f'''<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">{app_name}</string>
+</resources>
+'''
+    with open(os.path.join(temp_dir, 'app', 'src', 'main', 'res', 'values', 'strings.xml'), 'w') as f:
+        f.write(strings)
+    
+    # gradle-wrapper.properties
+    wrapper_props = '''distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-8.2-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+'''
+    with open(os.path.join(temp_dir, 'gradle', 'wrapper', 'gradle-wrapper.properties'), 'w') as f:
+        f.write(wrapper_props)
+    
+    # gradlew script
+    gradlew = '''#!/bin/sh
+exec gradle "$@"
+'''
+    with open(os.path.join(temp_dir, 'gradlew'), 'w') as f:
+        f.write(gradlew)
+    os.chmod(os.path.join(temp_dir, 'gradlew'), 0o755)
+    
+    print(f"[Android Build] Created basic Android project structure for {app_name}")
+
+
+@app.route('/download-apk/<project_id>', methods=['GET'])
+def download_apk(project_id):
+    """Download a built APK file."""
+    cleanup_old_android_builds()
+    
+    if project_id not in BUILT_ANDROID_APKS:
+        return jsonify({'error': f'APK for project {project_id} not found or expired'}), 404
+    
+    info = BUILT_ANDROID_APKS[project_id]
+    apk_path = info['apk_path']
+    
+    if not os.path.exists(apk_path):
+        del BUILT_ANDROID_APKS[project_id]
+        return jsonify({'error': 'APK file no longer exists'}), 404
+    
+    app_name = info.get('app_name', 'app')
+    filename = f"{app_name.replace(' ', '_')}-debug.apk"
+    
+    return send_file(
+        apk_path,
+        mimetype='application/vnd.android.package-archive',
+        as_attachment=True,
+        download_name=filename
+    )
+
+
+@app.route('/android-builds', methods=['GET'])
+def list_android_builds():
+    """List all available Android builds."""
+    cleanup_old_android_builds()
+    
+    import time
+    builds = []
+    base_url = request.host_url.rstrip('/')
+    
+    for project_id, info in BUILT_ANDROID_APKS.items():
+        builds.append({
+            'project_id': project_id,
+            'app_name': info.get('app_name', 'Unknown'),
+            'package_name': info.get('package_name', 'Unknown'),
+            'apk_size': info.get('apk_size', 0),
+            'download_url': f"{base_url}/download-apk/{project_id}",
+            'age_seconds': int(time.time() - info['created_at']),
+            'expires_in_seconds': max(0, 3600 - int(time.time() - info['created_at']))
+        })
+    
+    return jsonify({
+        'builds': builds,
+        'count': len(builds)
+    })
+
+
+# Update runtime-status to include Go and Android
+@app.route('/runtime-status', methods=['GET'])
+def runtime_status():
+    """Check the status of all available runtimes."""
+    cleanup_stopped_projects()
+    cleanup_stopped_php_projects()
+    cleanup_stopped_rust_projects()
+    cleanup_stopped_go_projects()
+    cleanup_old_android_builds()
+    
+    return jsonify({
+        'runtimes': {
+            'python': True,  # Always available (this is a Python app)
+            'php': check_php_available(),
+            'composer': check_composer_available(),
+            'rust': check_rust_available(),
+            'cargo': check_cargo_available(),
+            'node': check_node_available(),
+            'go': check_go_available(),
+            'java': check_java_available(),
+            'android_sdk': check_android_sdk_available()
+        },
+        'running_projects': {
+            'python': len(RUNNING_PYTHON_PROJECTS),
+            'php': len(RUNNING_PHP_PROJECTS),
+            'rust': len(RUNNING_RUST_PROJECTS),
+            'go': len(RUNNING_GO_PROJECTS)
+        },
+        'android_builds': len(BUILT_ANDROID_APKS)
+    })
 
 
 if __name__ == '__main__':
