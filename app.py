@@ -1656,6 +1656,9 @@ def deploy_pages():
             
             # Check if build script exists
             scripts = pkg.get("scripts", {})
+            build_script = scripts.get("build", "")
+            print(f"[Pages] Build script: {build_script}", flush=True)
+            
             if "build" not in scripts:
                 print(f"[Pages] ⚠️ No 'build' script found in package.json", flush=True)
                 print(f"[Pages] Available scripts: {list(scripts.keys())}", flush=True)
@@ -1666,38 +1669,75 @@ def deploy_pages():
                         'available_scripts': list(scripts.keys())
                     }), 500
             
-            # Run build
-            print(f"[Pages] Running npm run build...", flush=True)
+            # Run build with more verbose output
+            print(f"[Pages] Running npm run build in {temp_dir}...", flush=True)
+            print(f"[Pages] Working directory contents: {os.listdir(temp_dir)[:10]}", flush=True)
+            
+            # Try running build with npm's verbose flag for better error visibility
             result = subprocess.run(
-                ["npm", "run", "build"],
+                ["npm", "run", "build", "--", "--verbose"] if "vite" in deps else ["npm", "run", "build"],
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
                 env=env,
                 timeout=300
             )
+            
+            # Log output immediately for debugging
+            if result.stdout:
+                print(f"[Pages] Build stdout (first 2000 chars): {result.stdout[:2000]}", flush=True)
+            if result.stderr:
+                print(f"[Pages] Build stderr (first 2000 chars): {result.stderr[:2000]}", flush=True)
+            
             if result.returncode != 0:
                 # Capture both stdout and stderr for better error reporting
                 error_output = result.stderr or result.stdout or "No error output available"
-                print(f"[Pages] Build failed with return code: {result.returncode}", flush=True)
-                print(f"[Pages] Build stderr: {result.stderr[:1000]}", flush=True)
-                print(f"[Pages] Build stdout: {result.stdout[:1000]}", flush=True)
+                print(f"[Pages] ❌ Build failed with return code: {result.returncode}", flush=True)
+                print(f"[Pages] Full stderr length: {len(result.stderr) if result.stderr else 0}", flush=True)
+                print(f"[Pages] Full stdout length: {len(result.stdout) if result.stdout else 0}", flush=True)
+                
+                # Check if output directory was created despite failure
+                build_output_path = os.path.join(temp_dir, output_dir)
+                if os.path.exists(build_output_path):
+                    print(f"[Pages] ⚠️ Build output directory exists despite failure: {build_output_path}", flush=True)
+                    print(f"[Pages] Output directory contents: {os.listdir(build_output_path)[:10]}", flush=True)
                 
                 # Provide more detailed error message
-                error_msg = error_output[:1000] if error_output else "Build command failed with no output"
+                if error_output and error_output != "No error output available":
+                    error_msg = error_output[:2000]  # Increased limit
+                else:
+                    error_msg = f"Build command failed with return code {result.returncode} but produced no output. This may indicate a silent failure or timeout."
+                
                 return jsonify({
                     'error': f'Build failed: {error_msg}',
                     'return_code': result.returncode,
-                    'stderr': result.stderr[:500] if result.stderr else None,
-                    'stdout': result.stdout[:500] if result.stdout else None
+                    'stderr': result.stderr[:1000] if result.stderr else None,
+                    'stdout': result.stdout[:1000] if result.stdout else None,
+                    'build_script': build_script
                 }), 500
+            else:
+                print(f"[Pages] ✅ Build completed successfully", flush=True)
+                # Verify build output exists
+                build_output_path = os.path.join(temp_dir, output_dir)
+                if os.path.exists(build_output_path):
+                    files_in_output = os.listdir(build_output_path)
+                    print(f"[Pages] Build output directory contains {len(files_in_output)} items", flush=True)
+                    if files_in_output:
+                        print(f"[Pages] Sample files: {files_in_output[:5]}", flush=True)
+                else:
+                    print(f"[Pages] ⚠️ Build succeeded but output directory {output_dir} not found", flush=True)
         
         # Check if output directory exists
         build_path = os.path.join(temp_dir, output_dir)
         if not os.path.exists(build_path):
             # Fall back to current directory if build output doesn't exist
+            print(f"[Pages] ⚠️ No {output_dir} directory found, checking project root...", flush=True)
+            # List what's in the temp directory
+            if os.path.exists(temp_dir):
+                root_contents = os.listdir(temp_dir)
+                print(f"[Pages] Project root contents: {root_contents[:10]}", flush=True)
             build_path = temp_dir
-            print(f"[Pages] No {output_dir} directory, using project root", flush=True)
+            print(f"[Pages] Using project root as build path", flush=True)
         
         # Ensure _redirects file is in build output for React/Vite apps
         if is_react_app:
