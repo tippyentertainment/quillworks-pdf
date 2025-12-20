@@ -2219,8 +2219,80 @@ def deploy_pages():
             
             domain_attached = False
             
-            # Use Cloudflare API directly for domain attachment (more reliable than Wrangler CLI)
-            print(f"[Pages] Attaching custom domain via Cloudflare API: {custom_domain}")
+            # Step 1: Create DNS CNAME record via Cloudflare API (if zone_id is provided)
+            dns_record_created = False
+            if cf_zone_id and len(cf_zone_id) == 32 and all(c in '0123456789abcdefABCDEF' for c in cf_zone_id):
+                # Validate zone_id is a 32-character hex string
+                try:
+                    print(f"[Pages] Creating DNS CNAME record for {custom_domain}...")
+                    # Extract subdomain from custom_domain (e.g., "dev-vibe-123.quillworks.org" -> "dev-vibe-123")
+                    subdomain = custom_domain.split('.')[0]
+                    # Target should point to the Pages project's .pages.dev domain
+                    target = f"{project_name}.pages.dev"
+                    
+                    dns_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
+                    dns_headers = {
+                        "Authorization": f"Bearer {cf_api_token or os.environ.get('CLOUDFLARE_API_TOKEN')}",
+                        "Content-Type": "application/json"
+                    }
+                    dns_data = {
+                        "type": "CNAME",
+                        "name": subdomain,  # Just the subdomain part
+                        "content": target,  # Points to project.pages.dev
+                        "ttl": 3600,  # 1 hour TTL
+                        "comment": f"Auto-created for Cloudflare Pages project: {project_name}"
+                    }
+                    
+                    # Check if DNS record already exists
+                    check_dns_url = f"{dns_url}?name={subdomain}&type=CNAME"
+                    check_response = requests.get(check_dns_url, headers=dns_headers, timeout=30)
+                    
+                    if check_response.status_code == 200:
+                        existing_records = check_response.json().get("result", [])
+                        if existing_records:
+                            existing_record = existing_records[0]
+                            if existing_record.get("content") == target:
+                                print(f"[Pages] ✅ DNS CNAME record already exists and points to correct target: {target}")
+                                dns_record_created = True
+                            else:
+                                print(f"[Pages] ⚠️ DNS CNAME record exists but points to different target: {existing_record.get('content')}")
+                                print(f"[Pages] ⚠️ Expected: {target}, Found: {existing_record.get('content')}")
+                                print(f"[Pages] ⚠️ You may need to update the DNS record manually in Cloudflare Dashboard")
+                        else:
+                            # Create new DNS record
+                            create_response = requests.post(dns_url, headers=dns_headers, json=dns_data, timeout=30)
+                            if create_response.status_code in [200, 201]:
+                                print(f"[Pages] ✅ Created DNS CNAME record: {subdomain} -> {target}")
+                                dns_record_created = True
+                            else:
+                                error_data = create_response.json() if create_response.content else {}
+                                error_msg = error_data.get("errors", [{}])[0].get("message", create_response.text)
+                                print(f"[Pages] ⚠️ Failed to create DNS record: {error_msg}")
+                                print(f"[Pages] ⚠️ You may need to create the DNS record manually:")
+                                print(f"[Pages] ⚠️   Type: CNAME")
+                                print(f"[Pages] ⚠️   Name: {subdomain}")
+                                print(f"[Pages] ⚠️   Target: {target}")
+                    else:
+                        print(f"[Pages] ⚠️ Could not check existing DNS records: {check_response.status_code}")
+                        
+                except Exception as dns_err:
+                    print(f"[Pages] ⚠️ Error creating DNS record: {dns_err}")
+                    print(f"[Pages] ⚠️ You may need to create the DNS record manually in Cloudflare Dashboard")
+            elif cf_zone_id:
+                print(f"[Pages] ⚠️ Invalid zone_id format (must be 32-character hex string), skipping DNS creation")
+                print(f"[Pages] ⚠️ You may need to create the DNS record manually:")
+                print(f"[Pages] ⚠️   Type: CNAME")
+                print(f"[Pages] ⚠️   Name: {custom_domain.split('.')[0]}")
+                print(f"[Pages] ⚠️   Target: {project_name}.pages.dev")
+            else:
+                print(f"[Pages] ⚠️ No zone_id provided, skipping DNS record creation")
+                print(f"[Pages] ⚠️ You may need to create the DNS record manually:")
+                print(f"[Pages] ⚠️   Type: CNAME")
+                print(f"[Pages] ⚠️   Name: {custom_domain.split('.')[0]}")
+                print(f"[Pages] ⚠️   Target: {project_name}.pages.dev")
+            
+            # Step 2: Attach domain to Pages project via Cloudflare API
+            print(f"[Pages] Attaching custom domain to Pages project via Cloudflare API: {custom_domain}")
             print(f"[Pages] Project name: {project_name}")
             
             # Get the project ID first
@@ -2386,7 +2458,65 @@ def attach_domain():
         else:
             print(f"[Pages] ⚠️ Could not verify project list, continuing anyway...")
         
-        # Use Cloudflare API directly for domain attachment (more reliable than Wrangler CLI)
+        # Step 1: Create DNS CNAME record via Cloudflare API (if zone_id is provided)
+        dns_record_created = False
+        if cf_zone_id and len(cf_zone_id) == 32 and all(c in '0123456789abcdefABCDEF' for c in cf_zone_id):
+            # Validate zone_id is a 32-character hex string
+            try:
+                print(f"[Pages] Creating DNS CNAME record for {custom_domain}...")
+                # Extract subdomain from custom_domain (e.g., "dev-vibe-123.quillworks.org" -> "dev-vibe-123")
+                subdomain = custom_domain.split('.')[0]
+                # Target should point to the Pages project's .pages.dev domain
+                target = f"{project_name}.pages.dev"
+                
+                dns_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
+                dns_headers = {
+                    "Authorization": f"Bearer {cf_api_token}",
+                    "Content-Type": "application/json"
+                }
+                dns_data = {
+                    "type": "CNAME",
+                    "name": subdomain,  # Just the subdomain part
+                    "content": target,  # Points to project.pages.dev
+                    "ttl": 3600,  # 1 hour TTL
+                    "comment": f"Auto-created for Cloudflare Pages project: {project_name}"
+                }
+                
+                # Check if DNS record already exists
+                check_dns_url = f"{dns_url}?name={subdomain}&type=CNAME"
+                check_response = requests.get(check_dns_url, headers=dns_headers, timeout=30)
+                
+                if check_response.status_code == 200:
+                    existing_records = check_response.json().get("result", [])
+                    if existing_records:
+                        existing_record = existing_records[0]
+                        if existing_record.get("content") == target:
+                            print(f"[Pages] ✅ DNS CNAME record already exists and points to correct target: {target}")
+                            dns_record_created = True
+                        else:
+                            print(f"[Pages] ⚠️ DNS CNAME record exists but points to different target: {existing_record.get('content')}")
+                            print(f"[Pages] ⚠️ Expected: {target}, Found: {existing_record.get('content')}")
+                    else:
+                        # Create new DNS record
+                        create_response = requests.post(dns_url, headers=dns_headers, json=dns_data, timeout=30)
+                        if create_response.status_code in [200, 201]:
+                            print(f"[Pages] ✅ Created DNS CNAME record: {subdomain} -> {target}")
+                            dns_record_created = True
+                        else:
+                            error_data = create_response.json() if create_response.content else {}
+                            error_msg = error_data.get("errors", [{}])[0].get("message", create_response.text)
+                            print(f"[Pages] ⚠️ Failed to create DNS record: {error_msg}")
+                else:
+                    print(f"[Pages] ⚠️ Could not check existing DNS records: {check_response.status_code}")
+                    
+            except Exception as dns_err:
+                print(f"[Pages] ⚠️ Error creating DNS record: {dns_err}")
+        elif cf_zone_id:
+            print(f"[Pages] ⚠️ Invalid zone_id format (must be 32-character hex string), skipping DNS creation")
+        else:
+            print(f"[Pages] ⚠️ No zone_id provided, skipping DNS record creation")
+        
+        # Step 2: Attach domain to Pages project via Cloudflare API
         attach_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/pages/projects/{project_name}/domains"
         attach_headers = {
             "Authorization": f"Bearer {cf_api_token}",
