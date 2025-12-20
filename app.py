@@ -1785,10 +1785,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
         
         # Create the Pages project first (if it doesn't exist)
         # Cloudflare Pages automatically creates preview environments for non-production branches
-        # When we deploy to "preview" branch, it creates a preview environment automatically
-        # When we deploy to "main" branch, it uses the production environment
         print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
-        print(f"[Pages] Production branch: main (preview branch will create preview environment automatically)")
         max_project_retries = 3
         project_creation_success = False
         
@@ -1813,12 +1810,10 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             
             if result.returncode == 0:
                 print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
-                print(f"[Pages] Note: Preview environment will be created automatically when deploying to 'preview' branch")
                 project_creation_success = True
                 break
             elif "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
                 print(f"[Pages] Cloudflare Pages project already exists: {project_name} (that's OK)")
-                print(f"[Pages] Will deploy to {'preview' if environment == 'dev' else 'main'} branch")
                 project_creation_success = True
                 break
             else:
@@ -1880,19 +1875,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     if 'https://' in line and '.pages.dev' in line:
                         deployment_url = line.strip()
                         break
-                
-                if deployment_url:
-                    print(f"[Pages] ✅ Deployed successfully to {environment} environment: {deployment_url}")
-                    if environment == "dev":
-                        print(f"[Pages] Preview environment created/updated at: {deployment_url}")
-                        print(f"[Pages] This is the preview environment (preview branch) - shown in iframe for coding")
-                    else:
-                        print(f"[Pages] Production environment deployed at: {deployment_url}")
-                        print(f"[Pages] This is the production environment (main branch) - opened via 'View Live App'")
-                else:
-                    print(f"[Pages] ⚠️ Deployment succeeded but couldn't parse deployment URL from output")
-                    print(f"[Pages] Full output: {result.stdout[:500]}")
-                
+                print(f"[Pages] ✅ Deployed successfully: {deployment_url}")
                 break
             else:
                 error_msg = result.stderr or result.stdout or ""
@@ -2159,18 +2142,12 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             import traceback
             traceback.print_exc()
         
-        # Return deployment information
-        # For dev: returns dev-vibe-*.pages.dev URL and dev-vibe-*.quillworks.org custom domain
-        # For prod: returns vibe-*.pages.dev URL and vibe-*.quillworks.org custom domain
         return jsonify({
             "success": True,
-            "url": deployment_url,  # .pages.dev URL (e.g., dev-vibe-*.pages.dev or vibe-*.pages.dev)
+            "url": deployment_url,
             "project_name": project_name,
-            "custom_domain": custom_domain,  # Custom domain (e.g., dev-vibe-*.quillworks.org or vibe-*.quillworks.org)
-            "environment": environment,  # 'dev' or 'prod'
-            "pages_dev_url": deployment_url if environment == "dev" else None,  # Explicit dev .pages.dev URL
-            "pages_prod_url": deployment_url if environment == "prod" else None,  # Explicit prod .pages.dev URL
-            "custom_domain_url": f"https://{custom_domain}"  # Full custom domain URL
+            "custom_domain": custom_domain,
+            "environment": environment  # 'dev' or 'prod'
         })
         
     except subprocess.TimeoutExpired:
