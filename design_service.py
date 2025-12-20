@@ -55,12 +55,27 @@ def atlas_generate_image(model: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=120)
         if resp.status_code >= 400:
-            error_text = resp.text or f"HTTP {resp.status_code}"
+            print(f"[AtlasCloud] Error response: {resp.status_code} - {resp.text[:1000]}")
+            error_text = f"HTTP {resp.status_code}"
             try:
                 error_json = resp.json()
-                error_text = error_json.get("error") or error_json.get("message") or error_text
-            except:
-                pass
+                # Try various error field patterns, filtering out null/None values
+                candidates = [
+                    error_json.get("error"),
+                    error_json.get("message"),
+                    error_json.get("detail"),
+                    error_json.get("data", {}).get("error") if isinstance(error_json.get("data"), dict) else None,
+                    error_json.get("data", {}).get("message") if isinstance(error_json.get("data"), dict) else None,
+                ]
+                for candidate in candidates:
+                    if candidate and isinstance(candidate, str) and candidate.strip() and candidate.lower() != "null":
+                        error_text = candidate.strip()
+                        break
+            except Exception as parse_err:
+                print(f"[AtlasCloud] Failed to parse error JSON: {parse_err}")
+            
+            if resp.status_code == 500:
+                raise Exception(f"AtlasCloud server error - the service may be temporarily unavailable. Please try again.")
             raise Exception(f"AtlasCloud API error (status {resp.status_code}): {error_text}")
         response_data = resp.json()
         if not response_data:
