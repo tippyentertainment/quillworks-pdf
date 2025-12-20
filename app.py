@@ -1844,12 +1844,14 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             else:
                 print(f"[Pages] ✅ _redirects file found in build output")
         
-        # Create the Pages project first (if it doesn't exist)
+        # Create or verify Cloudflare Pages project exists
         # Cloudflare Pages automatically creates preview environments for non-production branches
         # When we deploy to "preview" branch, it creates a preview environment automatically
         # When we deploy to "main" branch, it uses the production environment
-        print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
+        # Note: We always attempt creation - if project already exists, wrangler will tell us and we'll continue
+        print(f"[Pages] Creating/verifying Cloudflare Pages project: {project_name}")
         print(f"[Pages] Production branch: main (preview branch will create preview environment automatically)")
+        
         max_project_retries = 3
         project_creation_success = False
         
@@ -1859,6 +1861,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 import time
                 time.sleep(5)
             
+            print(f"[Pages] Attempting to create project (attempt {attempt + 1}/{max_project_retries})...")
             result = subprocess.run(
                 [
                     "npx", "wrangler", "pages", "project", "create", project_name,
@@ -1872,13 +1875,19 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 timeout=120
             )
             
+            print(f"[Pages] Project create exit code: {result.returncode}")
+            if result.stdout:
+                print(f"[Pages] Project create stdout: {result.stdout[:500]}")
+            if result.stderr:
+                print(f"[Pages] Project create stderr: {result.stderr[:500]}")
+            
             if result.returncode == 0:
                 print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
                 print(f"[Pages] Note: Preview environment will be created automatically when deploying to 'preview' branch")
                 project_creation_success = True
                 break
             elif "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
-                print(f"[Pages] Cloudflare Pages project already exists: {project_name} (that's OK)")
+                print(f"[Pages] ✅ Cloudflare Pages project already exists: {project_name} (that's OK)")
                 print(f"[Pages] Will deploy to {'preview' if environment == 'dev' else 'main'} branch")
                 project_creation_success = True
                 break
@@ -1886,17 +1895,17 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 error_output = result.stderr or result.stdout or "No error output available"
                 print(f"[Pages] Project creation attempt {attempt + 1} failed: {error_output[:500]}")
                 if attempt == max_project_retries - 1:
-                    return jsonify({
-                        'error': f'Failed to create Cloudflare Pages project after {max_project_retries} attempts: {error_output[:500]}',
-                        'details': {
-                            'exit_code': result.returncode,
-                            'stderr': result.stderr[:1000] if result.stderr else None,
-                            'stdout': result.stdout[:1000] if result.stdout else None
-                        }
-                    }), 500
+                    # On last attempt, if it's not a clear "already exists" error, we'll still try to deploy
+                    # Sometimes the project exists but the error message isn't clear
+                    print(f"[Pages] ⚠️ Project creation failed after {max_project_retries} attempts")
+                    print(f"[Pages] ⚠️ Will attempt deployment anyway - project may already exist")
+                    # Don't return error, let deployment attempt proceed
+                    # If project doesn't exist, deployment will fail with a clear error
+                    break
         
         if not project_creation_success:
-            return jsonify({'error': 'Failed to create Cloudflare Pages project before deployment'}), 500
+            print(f"[Pages] ⚠️ Could not confirm project creation, but proceeding with deployment")
+            print(f"[Pages] ⚠️ If project doesn't exist, deployment will fail with a clear error message")
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
         # For dev: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
