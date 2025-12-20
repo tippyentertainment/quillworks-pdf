@@ -63,12 +63,20 @@ except ImportError:
     TEXT_OVERLAY_AVAILABLE = False
     print("WARNING: Text overlay not available")
 
-try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
-except ImportError:
-    REMBG_AVAILABLE = False
-    print("WARNING: rembg not available")
+# rembg is lazy-loaded to avoid slow startup from numba compilation
+REMBG_AVAILABLE = True
+_rembg_remove = None
+
+def get_rembg_remove():
+    global _rembg_remove, REMBG_AVAILABLE
+    if _rembg_remove is None:
+        try:
+            from rembg import remove
+            _rembg_remove = remove
+        except ImportError:
+            REMBG_AVAILABLE = False
+            print("WARNING: rembg not available")
+    return _rembg_remove
 
 try:
     from generate_epub import build_epub
@@ -453,7 +461,8 @@ def add_text_overlay_endpoint():
 @app.route('/remove-background', methods=['POST'])
 def remove_background():
     """Remove background from an image using rembg"""
-    if not REMBG_AVAILABLE:
+    remove_fn = get_rembg_remove()
+    if not REMBG_AVAILABLE or remove_fn is None:
         return jsonify({'error': 'rembg not available. Install rembg package.'}), 500
     
     try:
@@ -472,7 +481,7 @@ def remove_background():
         input_buffer = BytesIO(image_bytes)
         output_buffer = BytesIO()
         
-        output_buffer.write(remove(input_buffer.read()))
+        output_buffer.write(remove_fn(input_buffer.read()))
         output_buffer.seek(0)
         
         print(f"Background removed successfully")
