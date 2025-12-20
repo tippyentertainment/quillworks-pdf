@@ -19,6 +19,25 @@ import json
 import shutil
 import tempfile
 import subprocess
+import requests
+
+# ReportLab imports
+try:
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, Table, TableStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    REPORTLAB_AVAILABLE = True
+    # Default font family - can be customized
+    FONT_FAMILY = 'Helvetica'
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    FONT_FAMILY = 'Helvetica'
+    print("WARNING: ReportLab not available, PDF generation endpoints will fail")
 
 try:
     from generate_book_docx import generate_book_docx
@@ -131,6 +150,7 @@ def health():
             'rembg': REMBG_AVAILABLE,
             'epub_generation': EPUB_AVAILABLE,
             'design_service': DESIGN_SERVICE_AVAILABLE,
+            'reportlab': REPORTLAB_AVAILABLE,
             'pages_deploy': True
         }
     })
@@ -550,13 +570,12 @@ def generate_epub_endpoint():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-
 @app.route('/generate-recipe-book-pdf', methods=['POST'])
 def generate_recipe_book_pdf():
     """Generate PDF for recipe books with two-page spreads matching the preview"""
+    if not REPORTLAB_AVAILABLE:
+        return jsonify({'error': 'ReportLab not available. Install reportlab package.'}), 500
+    
     try:
         data = request.json
         recipe_book_data = data.get('data', {})
@@ -933,6 +952,9 @@ def generate_recipe_book_pdf():
 @app.route('/generate-book-pdf', methods=['POST'])
 def generate_book_pdf():
     """Generate PDF for regular books with headers, page numbers, and proper TOC"""
+    if not REPORTLAB_AVAILABLE:
+        return jsonify({'error': 'ReportLab not available. Install reportlab package.'}), 500
+    
     try:
         data = request.json
         book_data = data.get('data', {})
@@ -1229,6 +1251,9 @@ def generate_book_pdf():
 @app.route('/generate-childrens-book-pdf', methods=['POST'])
 def generate_childrens_book_pdf():
     """Generate PDF for children's books with 8.5x11 pages"""
+    if not REPORTLAB_AVAILABLE:
+        return jsonify({'error': 'ReportLab not available. Install reportlab package.'}), 500
+    
     try:
         data = request.json
         book_data = data.get('data', {})
@@ -1343,6 +1368,9 @@ def generate_childrens_book_pdf():
 @app.route('/generate-greeting-card-pdf', methods=['POST'])
 def generate_greeting_card_pdf():
     """Generate PDF for greeting cards with two-page fold layout"""
+    if not REPORTLAB_AVAILABLE:
+        return jsonify({'error': 'ReportLab not available. Install reportlab package.'}), 500
+    
     try:
         data = request.json
         card_data = data.get('data', {})
@@ -1559,14 +1587,22 @@ def deploy_pages():
         cf_account_id = data.get('cf_account_id')
         cf_api_token = data.get('cf_api_token')
         cf_zone_id = data.get('cf_zone_id')
-        custom_domain = data.get('custom_domain')  # Allow custom domain to be passed in
         
         if not project_name or not subdomain or not files:
             return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
         
-        # If custom_domain not provided, construct it from subdomain
-        if not custom_domain:
-            custom_domain = f"{subdomain}.quillworks.org"
+        # Validate that subdomain matches project_name pattern
+        if subdomain != project_name:
+            return jsonify({
+                'error': f'Subdomain "{subdomain}" must match project_name "{project_name}" for consistency'
+            }), 400
+        
+        # Validate subdomain format (alphanumeric, hyphens, underscores only, no spaces)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', subdomain):
+            return jsonify({
+                'error': 'Subdomain must contain only alphanumeric characters, hyphens, and underscores'
+            }), 400
         
         # Check for Cloudflare credentials (from request or environment)
         has_api_token = cf_api_token or os.environ.get("CLOUDFLARE_API_TOKEN")
@@ -1576,7 +1612,7 @@ def deploy_pages():
         
         # Create temp directory for project files
         temp_dir = tempfile.mkdtemp(prefix=f"pages-{project_name}-")
-        print(f"[Pages] Created temp dir: {temp_dir}", flush=True)
+        print(f"[Pages] Created temp dir: {temp_dir}")
         
         # Write all files to temp directory
         for file in files:
@@ -1585,7 +1621,15 @@ def deploy_pages():
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(file.get('content', ''))
         
-        print(f"[Pages] Wrote {len(files)} files", flush=True)
+        print(f"[Pages] Wrote {len(files)} files")
+        
+        # Create _redirects file for Cloudflare Pages (for client-side routing)
+        # This is needed for SPA routing to work correctly
+        redirects_path = os.path.join(temp_dir, "_redirects")
+        if not os.path.exists(redirects_path):
+            with open(redirects_path, 'w') as f:
+                f.write("/*    /index.html   200\n")
+            print(f"[Pages] ✅ Created _redirects file for client-side routing")
         
         # Set environment variables for Wrangler
         env = os.environ.copy()
@@ -1597,11 +1641,22 @@ def deploy_pages():
         # Detect framework and build
         package_json_path = os.path.join(temp_dir, "package.json")
         output_dir = "dist"
-        is_react_app = False
         
         if os.path.exists(package_json_path):
             with open(package_json_path) as f:
                 pkg = json.load(f)
+            
+            # Fix build script: Remove --verbose flag if present (Vite doesn't support it)
+            if "scripts" in pkg and "build" in pkg["scripts"]:
+                build_script = pkg["scripts"]["build"]
+                if "--verbose" in build_script:
+                    # Remove --verbose flag
+                    pkg["scripts"]["build"] = build_script.replace("--verbose", "").strip()
+                    # Write back the fixed package.json
+                    with open(package_json_path, 'w') as f:
+                        json.dump(pkg, f, indent=2)
+                    print(f"[Pages] ✅ Removed --verbose from build script (Vite doesn't support it)")
+                    print(f"[Pages] Build script: {pkg['scripts']['build']}")
             
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
             
@@ -1610,28 +1665,9 @@ def deploy_pages():
                 output_dir = "out"  # Next.js static export
             elif "vite" in deps or "react" in deps:
                 output_dir = "dist"
-                is_react_app = True
-            
-            # Automatically add _redirects file for React/Vite apps for client-side routing
-            if is_react_app:
-                # Check if _redirects already exists in files
-                has_redirects = any(f.get('path', '').endswith('_redirects') or 
-                                   f.get('path', '').endswith('public/_redirects') for f in files)
-                
-                if not has_redirects:
-                    # Create _redirects file in public folder (Vite/CRA standard)
-                    public_dir = os.path.join(temp_dir, "public")
-                    os.makedirs(public_dir, exist_ok=True)
-                    redirects_path = os.path.join(public_dir, "_redirects")
-                    
-                    # Cloudflare Pages redirect rule: all routes -> index.html with 200 status
-                    with open(redirects_path, 'w', encoding='utf-8') as f:
-                        f.write("/*    /index.html   200\n")
-                    
-                    print(f"[Pages] ✅ Created _redirects file for client-side routing", flush=True)
             
             # Install dependencies
-            print(f"[Pages] Running npm install...", flush=True)
+            print(f"[Pages] Running npm install...")
             result = subprocess.run(
                 ["npm", "install", "--legacy-peer-deps"],
                 cwd=temp_dir,
@@ -1641,38 +1677,11 @@ def deploy_pages():
                 timeout=300  # 5 min timeout
             )
             if result.returncode != 0:
-                error_output = result.stderr or result.stdout or "No error output available"
-                print(f"[Pages] npm install failed with return code: {result.returncode}", flush=True)
-                print(f"[Pages] npm install stderr: {result.stderr[:1000]}", flush=True)
-                print(f"[Pages] npm install stdout: {result.stdout[:1000]}", flush=True)
-                
-                error_msg = error_output[:1000] if error_output else "npm install failed with no output"
-                return jsonify({
-                    'error': f'npm install failed: {error_msg}',
-                    'return_code': result.returncode,
-                    'stderr': result.stderr[:500] if result.stderr else None,
-                    'stdout': result.stdout[:500] if result.stdout else None
-                }), 500
-            
-            # Check if build script exists
-            scripts = pkg.get("scripts", {})
-            build_script = scripts.get("build", "")
-            print(f"[Pages] Build script: {build_script}", flush=True)
-            
-            if "build" not in scripts:
-                print(f"[Pages] ⚠️ No 'build' script found in package.json", flush=True)
-                print(f"[Pages] Available scripts: {list(scripts.keys())}", flush=True)
-                # Try to proceed anyway - some frameworks might not need explicit build
-                if output_dir == "dist" and not os.path.exists(os.path.join(temp_dir, output_dir)):
-                    return jsonify({
-                        'error': 'No build script found in package.json and no build output directory exists. Please add a "build" script to package.json.',
-                        'available_scripts': list(scripts.keys())
-                    }), 500
+                print(f"[Pages] npm install failed: {result.stderr}")
+                return jsonify({'error': f'npm install failed: {result.stderr[:500]}'}), 500
             
             # Run build
-            print(f"[Pages] Running npm run build in {temp_dir}...", flush=True)
-            print(f"[Pages] Working directory contents: {os.listdir(temp_dir)[:10]}", flush=True)
-            
+            print(f"[Pages] Running npm run build...")
             result = subprocess.run(
                 ["npm", "run", "build"],
                 cwd=temp_dir,
@@ -1681,77 +1690,34 @@ def deploy_pages():
                 env=env,
                 timeout=300
             )
-            
-            # Log output immediately for debugging
-            if result.stdout:
-                print(f"[Pages] Build stdout (first 2000 chars): {result.stdout[:2000]}", flush=True)
-            if result.stderr:
-                print(f"[Pages] Build stderr (first 2000 chars): {result.stderr[:2000]}", flush=True)
-            
             if result.returncode != 0:
-                # Capture both stdout and stderr for better error reporting
                 error_output = result.stderr or result.stdout or "No error output available"
-                print(f"[Pages] ❌ Build failed with return code: {result.returncode}", flush=True)
-                print(f"[Pages] Full stderr length: {len(result.stderr) if result.stderr else 0}", flush=True)
-                print(f"[Pages] Full stdout length: {len(result.stdout) if result.stdout else 0}", flush=True)
-                
-                # Check if output directory was created despite failure
-                build_output_path = os.path.join(temp_dir, output_dir)
-                if os.path.exists(build_output_path):
-                    print(f"[Pages] ⚠️ Build output directory exists despite failure: {build_output_path}", flush=True)
-                    print(f"[Pages] Output directory contents: {os.listdir(build_output_path)[:10]}", flush=True)
-                
-                # Provide more detailed error message
-                if error_output and error_output != "No error output available":
-                    error_msg = error_output[:2000]  # Increased limit
-                else:
-                    error_msg = f"Build command failed with return code {result.returncode} but produced no output. This may indicate a silent failure or timeout."
-                
+                print(f"[Pages] Build failed (exit code {result.returncode})")
+                print(f"[Pages] Build stderr: {result.stderr[:1000] if result.stderr else '(empty)'}")
+                print(f"[Pages] Build stdout: {result.stdout[:1000] if result.stdout else '(empty)'}")
                 return jsonify({
-                    'error': f'Build failed: {error_msg}',
-                    'return_code': result.returncode,
-                    'stderr': result.stderr[:1000] if result.stderr else None,
-                    'stdout': result.stdout[:1000] if result.stdout else None,
-                    'build_script': build_script
+                    'error': f'Build failed: {error_output[:500]}',
+                    'details': {
+                        'exit_code': result.returncode,
+                        'stderr': result.stderr[:1000] if result.stderr else None,
+                        'stdout': result.stdout[:1000] if result.stdout else None
+                    }
                 }), 500
-            else:
-                print(f"[Pages] ✅ Build completed successfully", flush=True)
-                # Verify build output exists
-                build_output_path = os.path.join(temp_dir, output_dir)
-                if os.path.exists(build_output_path):
-                    files_in_output = os.listdir(build_output_path)
-                    print(f"[Pages] Build output directory contains {len(files_in_output)} items", flush=True)
-                    if files_in_output:
-                        print(f"[Pages] Sample files: {files_in_output[:5]}", flush=True)
-                else:
-                    print(f"[Pages] ⚠️ Build succeeded but output directory {output_dir} not found", flush=True)
         
         # Check if output directory exists
         build_path = os.path.join(temp_dir, output_dir)
         if not os.path.exists(build_path):
             # Fall back to current directory if build output doesn't exist
-            print(f"[Pages] ⚠️ No {output_dir} directory found, checking project root...", flush=True)
-            # List what's in the temp directory
-            if os.path.exists(temp_dir):
-                root_contents = os.listdir(temp_dir)
-                print(f"[Pages] Project root contents: {root_contents[:10]}", flush=True)
+            print(f"[Pages] ⚠️ No {output_dir} directory found after build")
+            print(f"[Pages] Checking temp_dir contents: {os.listdir(temp_dir)[:10]}")
             build_path = temp_dir
-            print(f"[Pages] Using project root as build path", flush=True)
-        
-        # Ensure _redirects file is in build output for React/Vite apps
-        if is_react_app:
-            redirects_in_build = os.path.join(build_path, "_redirects")
-            redirects_in_public = os.path.join(temp_dir, "public", "_redirects")
-            
-            # Copy _redirects to build output if it doesn't exist there
-            if not os.path.exists(redirects_in_build) and os.path.exists(redirects_in_public):
-                shutil.copy2(redirects_in_public, redirects_in_build)
-                print(f"[Pages] ✅ Copied _redirects to build output", flush=True)
-            elif os.path.exists(redirects_in_build):
-                print(f"[Pages] ✅ _redirects file found in build output", flush=True)
+            print(f"[Pages] Using project root as build path: {build_path}")
+        else:
+            print(f"[Pages] ✅ Build output found at: {build_path}")
+            print(f"[Pages] Build output contents: {os.listdir(build_path)[:10]}")
         
         # Create the Pages project first (if it doesn't exist)
-        print(f"[Pages] Creating Cloudflare Pages project: {project_name}", flush=True)
+        print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
         result = subprocess.run(
             [
                 "npx", "wrangler", "pages", "project", "create", project_name,
@@ -1765,21 +1731,19 @@ def deploy_pages():
         )
         # Ignore error if project already exists
         if result.returncode != 0 and "already exists" not in result.stderr.lower():
-            print(f"[Pages] Project creation output: {result.stderr}", flush=True)
+            print(f"[Pages] Project creation output: {result.stderr}")
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
-        print(f"[Pages] Deploying to Cloudflare Pages: {project_name}", flush=True)
-        
+        print(f"[Pages] Deploying to Cloudflare Pages: {project_name}")
         max_retries = 3
-        deploy_success = False
-        result = None
+        retry_delay = 5  # seconds
+        deployment_url = None
         
-        for attempt in range(1, max_retries + 1):
-            if attempt > 1:
-                wait_time = attempt * 2  # Exponential backoff: 2s, 4s, 6s
-                print(f"[Pages] Retry attempt {attempt}/{max_retries} after {wait_time}s...", flush=True)
+        for attempt in range(max_retries):
+            if attempt > 0:
+                print(f"[Pages] Retry attempt {attempt + 1}/{max_retries} after {retry_delay}s delay...")
                 import time
-                time.sleep(wait_time)
+                time.sleep(retry_delay)
             
             result = subprocess.run(
                 [
@@ -1796,117 +1760,175 @@ def deploy_pages():
             )
             
             if result.returncode == 0:
-                deploy_success = True
+                # Success - parse deployment URL
+                for line in result.stdout.split('\n'):
+                    if 'https://' in line and '.pages.dev' in line:
+                        deployment_url = line.strip()
+                        break
+                print(f"[Pages] ✅ Deployed successfully: {deployment_url}")
                 break
-            
-            # Check if it's a retryable error (service unavailable, rate limit, etc.)
-            error_output = result.stderr or result.stdout or ""
-            is_retryable = any(code in error_output for code in ["7010", "Service unavailable", "rate limit", "429"])
-            
-            if not is_retryable or attempt == max_retries:
-                # Non-retryable error or last attempt
-                break
-        
-        if not deploy_success:
-            error_output = result.stderr or result.stdout or "Unknown error"
-            print(f"[Pages] ❌ Wrangler deploy failed after {max_retries} attempts", flush=True)
-            print(f"[Pages] Error output: {error_output[:1000]}", flush=True)
-            
-            # Provide more helpful error messages
-            if "7010" in error_output or "Service unavailable" in error_output:
-                error_msg = "Cloudflare Pages service is temporarily unavailable. Please try again in a few moments."
-            elif "rate limit" in error_output.lower() or "429" in error_output:
-                error_msg = "Cloudflare API rate limit exceeded. Please wait a moment and try again."
             else:
-                error_msg = f"Deployment failed: {error_output[:500]}"
-            
-            return jsonify({
-                'error': error_msg,
-                'details': error_output[:1000],
-                'attempts': max_retries
-            }), 500
+                error_msg = result.stderr or result.stdout or ""
+                print(f"[Pages] Deploy attempt {attempt + 1} failed: {error_msg[:500]}")
+                
+                # Check if it's a retryable error (service unavailable, rate limit, etc.)
+                is_retryable = any(code in error_msg for code in ['7010', 'Service unavailable', 'rate limit', 'timeout'])
+                
+                if not is_retryable or attempt == max_retries - 1:
+                    # Non-retryable error or last attempt
+                    print(f"[Pages] ❌ Wrangler deploy failed after {attempt + 1} attempts")
+                    return jsonify({
+                        'error': f'Wrangler deploy failed: {error_msg[:500]}',
+                        'attempts': attempt + 1,
+                        'retryable': is_retryable
+                    }), 500
         
-        # Parse deployment URL from output
-        deployment_url = None
-        for line in result.stdout.split('\n'):
-            if 'https://' in line and '.pages.dev' in line:
-                deployment_url = line.strip()
-                break
+        if not deployment_url:
+            return jsonify({'error': 'Deployment succeeded but could not parse deployment URL'}), 500
         
-        print(f"[Pages] ✅ Deployed successfully: {deployment_url}", flush=True)
+        # deployment_url is now set in the retry loop above
         
         # Add custom domain to the Pages project
-        print(f"[Pages] Adding custom domain: {custom_domain}", flush=True)
+        custom_domain = f"{subdomain}.quillworks.org"
+        print(f"[Pages] Adding custom domain: {custom_domain}")
+        
+        import requests as req
+        api_token = env.get("CLOUDFLARE_API_TOKEN")
+        account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
+        zone_id = env.get("CLOUDFLARE_ZONE_ID")
         
         try:
-            import requests as req
-            api_token = env.get("CLOUDFLARE_API_TOKEN")
-            account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
-            zone_id = env.get("CLOUDFLARE_ZONE_ID")
-            
             # Step 1: Create DNS CNAME record pointing to pages.dev
             pages_dev_url = f"{project_name}.pages.dev"
-            print(f"[Pages] Creating DNS CNAME: {custom_domain} -> {pages_dev_url}", flush=True)
+            print(f"[Pages] Creating DNS CNAME: {custom_domain} -> {pages_dev_url}")
             
             if zone_id:
-                # Extract subdomain from custom_domain (e.g., "vibe-1616rpk2" from "vibe-1616rpk2.quillworks.org")
-                domain_parts = custom_domain.split('.')
-                if len(domain_parts) >= 2:
-                    subdomain_name = domain_parts[0]  # Just the subdomain part
+                dns_response = req.post(
+                    f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                    headers={
+                        "Authorization": f"Bearer {api_token}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "type": "CNAME",
+                        "name": subdomain,  # Just the subdomain part
+                        "content": pages_dev_url,
+                        "proxied": True
+                    },
+                    timeout=30
+                )
+                
+                if dns_response.status_code in [200, 201]:
+                    print(f"[Pages] ✅ DNS CNAME created: {custom_domain}")
+                else:
+                    dns_result = dns_response.json()
+                    # Check if record already exists (code 81057)
+                    if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
+                        print(f"[Pages] DNS record already exists, that's OK")
+                    else:
+                        print(f"[Pages] DNS response: {dns_response.status_code} - {dns_response.text[:300]}")
+            else:
+                print(f"[Pages] No zone_id provided, skipping DNS record creation")
+            
+            # Step 2: Add custom domain to Pages project using Wrangler CLI with retry logic
+            print(f"[Pages] Adding custom domain to Pages project via Wrangler CLI...")
+            domain_attached = False
+            max_domain_retries = 3
+            domain_retry_delay = 3  # seconds
+            
+            for domain_attempt in range(max_domain_retries):
+                if domain_attempt > 0:
+                    print(f"[Pages] Retry attempt {domain_attempt + 1}/{max_domain_retries} for domain attachment...")
+                    import time
+                    time.sleep(domain_retry_delay)
+                
+                # Use a simple working directory (home or temp) for Wrangler
+                # Wrangler doesn't need the project files, just the credentials
+                wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
+                
+                domain_result = subprocess.run(
+                    [
+                        "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
+                        "--project-name", project_name
+                    ],
+                    cwd=wrangler_cwd,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=90
+                )
+                
+                if domain_result.returncode == 0:
+                    print(f"[Pages] ✅ Custom domain added to Pages via Wrangler: {custom_domain}")
+                    domain_attached = True
+                    break
+                else:
+                    error_output = (domain_result.stderr or domain_result.stdout or "").lower()
+                    stdout_output = domain_result.stdout or ""
+                    stderr_output = domain_result.stderr or ""
                     
-                    dns_response = req.post(
-                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                    # Check if domain already exists (success case)
+                    if any(phrase in error_output for phrase in ["already", "already exists", "already configured", "is already"]):
+                        print(f"[Pages] ✅ Custom domain already attached (that's OK)")
+                        domain_attached = True
+                        break
+                    else:
+                        print(f"[Pages] Domain attachment attempt {domain_attempt + 1} failed:")
+                        if stdout_output:
+                            print(f"[Pages] stdout: {stdout_output[:300]}")
+                        if stderr_output:
+                            print(f"[Pages] stderr: {stderr_output[:300]}")
+                        
+                        # Check if it's a retryable error
+                        is_retryable = any(code in error_output for code in [
+                            "timeout", "network", "temporary", "service unavailable", 
+                            "rate limit", "429", "500", "502", "503", "504"
+                        ])
+                        
+                        if not is_retryable or domain_attempt == max_domain_retries - 1:
+                            # Non-retryable error or last attempt
+                            print(f"[Pages] ⚠️ Wrangler domain attachment failed after {domain_attempt + 1} attempts")
+                            print(f"[Pages] ⚠️ You can manually add it via:")
+                            print(f"[Pages] ⚠️   npx wrangler pages domain add {custom_domain} --project-name {project_name}")
+                            print(f"[Pages] ⚠️ Or in Cloudflare dashboard: https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
+                            break
+            
+            if not domain_attached:
+                print(f"[Pages] ⚠️ Could not attach domain automatically, but deployment succeeded")
+                print(f"[Pages] ⚠️ The site is available at: {deployment_url}")
+                print(f"[Pages] ⚠️ To attach the custom domain, run:")
+                print(f"[Pages] ⚠️   npx wrangler pages domain add {custom_domain} --project-name {project_name}")
+            
+            # Step 3: Verify domain is attached (optional check via API)
+            if domain_attached:
+                try:
+                    print(f"[Pages] Verifying domain attachment via API...")
+                    verify_response = req.get(
+                        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains",
                         headers={
                             "Authorization": f"Bearer {api_token}",
                             "Content-Type": "application/json"
                         },
-                        json={
-                            "type": "CNAME",
-                            "name": subdomain_name,  # Just the subdomain part
-                            "content": pages_dev_url,
-                            "proxied": True
-                        },
                         timeout=30
                     )
-                    
-                    if dns_response.status_code in [200, 201]:
-                        print(f"[Pages] ✅ DNS CNAME created: {custom_domain}", flush=True)
-                    else:
-                        dns_result = dns_response.json()
-                        # Check if record already exists (code 81057)
-                        if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
-                            print(f"[Pages] DNS record already exists, that's OK", flush=True)
+                    if verify_response.status_code == 200:
+                        domains = verify_response.json().get("result", [])
+                        domain_names = [d.get("domain", "") for d in domains if isinstance(d, dict)]
+                        if custom_domain in domain_names:
+                            print(f"[Pages] ✅ Verified: Custom domain is attached to Pages project")
                         else:
-                            print(f"[Pages] DNS response: {dns_response.status_code} - {dns_response.text[:300]}", flush=True)
-            else:
-                print(f"[Pages] No zone_id provided, skipping DNS record creation", flush=True)
-            
-            # Step 2: Add custom domain to Pages project using Wrangler CLI
-            print(f"[Pages] Adding custom domain to Pages project via Wrangler...", flush=True)
-            domain_result = subprocess.run(
-                [
-                    "npx", "wrangler", "pages", "domain", "add", custom_domain,
-                    "--project-name", project_name
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=60
-            )
-            
-            if domain_result.returncode == 0:
-                print(f"[Pages] ✅ Custom domain added to Pages: {custom_domain}", flush=True)
-            else:
-                # Check if domain already exists (common error message)
-                if "already" in domain_result.stderr.lower() or "already" in domain_result.stdout.lower():
-                    print(f"[Pages] Custom domain already exists, that's OK", flush=True)
-                else:
-                    print(f"[Pages] Wrangler domain add output: {domain_result.stdout}", flush=True)
-                    print(f"[Pages] Wrangler domain add error: {domain_result.stderr[:500]}", flush=True)
+                            print(f"[Pages] ⚠️ Warning: Custom domain not found in attached domains list")
+                            print(f"[Pages] ⚠️ Attached domains: {domain_names}")
+                            print(f"[Pages] ⚠️ It may take a few moments to propagate. If it doesn't appear, add manually:")
+                            print(f"[Pages] ⚠️   npx wrangler pages domain add {custom_domain} --project-name {project_name}")
+                    else:
+                        print(f"[Pages] Could not verify domain (API returned {verify_response.status_code})")
+                except Exception as verify_err:
+                    print(f"[Pages] Could not verify domain attachment: {verify_err}")
+                    print(f"[Pages] Domain was added via Wrangler, but verification failed. This is usually OK.")
                 
         except Exception as domain_err:
-            print(f"[Pages] Warning: Could not add custom domain: {domain_err}", flush=True)
+            print(f"[Pages] Warning: Could not add custom domain: {domain_err}")
             import traceback
             traceback.print_exc()
         
@@ -1926,6 +1948,79 @@ def deploy_pages():
         # Cleanup temp directory
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.route('/pages/attach-domain', methods=['POST'])
+def attach_domain():
+    """
+    Manually attach a custom domain to a Cloudflare Pages project.
+    Useful if automatic attachment failed during deployment.
+    """
+    try:
+        data = request.json
+        project_name = data.get('project_name')
+        custom_domain = data.get('custom_domain')
+        cf_account_id = data.get('cf_account_id') or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        cf_api_token = data.get('cf_api_token') or os.environ.get("CLOUDFLARE_API_TOKEN")
+        
+        if not project_name or not custom_domain:
+            return jsonify({'error': 'Missing required fields: project_name, custom_domain'}), 400
+        
+        if not cf_account_id or not cf_api_token:
+            return jsonify({'error': 'Missing Cloudflare credentials'}), 400
+        
+        import requests as req
+        
+        # Use Wrangler CLI (most reliable method)
+        import tempfile
+        temp_dir = tempfile.mkdtemp()
+        env = os.environ.copy()
+        env["CLOUDFLARE_API_TOKEN"] = cf_api_token
+        env["CLOUDFLARE_ACCOUNT_ID"] = cf_account_id
+        
+        # Use home directory or temp for Wrangler (doesn't need project files)
+        wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
+        
+        result = subprocess.run(
+            [
+                "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
+                "--project-name", project_name
+            ],
+            cwd=wrangler_cwd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=90
+        )
+        
+        if result.returncode == 0:
+            return jsonify({
+                'success': True,
+                'message': f'Custom domain {custom_domain} attached successfully',
+                'method': 'wrangler',
+                'command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}'
+            })
+        else:
+            error_output = (result.stderr or result.stdout or "").lower()
+            if any(phrase in error_output for phrase in ["already", "already exists", "already configured", "is already"]):
+                return jsonify({
+                    'success': True,
+                    'message': f'Custom domain {custom_domain} already attached',
+                    'method': 'wrangler'
+                })
+            else:
+                # Return detailed error with command to run manually
+                full_error = (result.stderr or result.stdout or "")[:1000]
+                return jsonify({
+                    'success': False,
+                    'error': f'Wrangler failed to attach domain',
+                    'wrangler_error': full_error,
+                    'manual_command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}',
+                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains'
+                }), 500
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
