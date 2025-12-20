@@ -2168,7 +2168,16 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 print(f"[Pages] ⚠️ DNS must be configured manually for {custom_domain} to work")
             
             # Step 2: Add custom domain to Pages project using Wrangler CLI with retry logic
+            # Wait a moment after DNS creation for Cloudflare to recognize the DNS record
+            if dns_created:
+                print(f"[Pages] Waiting 3 seconds for DNS to propagate before adding domain to Pages...")
+                import time
+                time.sleep(3)
+            
             print(f"[Pages] Adding custom domain to Pages project via Wrangler CLI...")
+            print(f"[Pages] Custom domain: {custom_domain}")
+            print(f"[Pages] Project name: {project_name}")
+            print(f"[Pages] Pages URL: {pages_dev_url}")
             domain_attached = False
             max_domain_retries = 3
             domain_retry_delay = 3  # seconds
@@ -2185,6 +2194,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 
                 # NOTE: wrangler pages domain add doesn't support --account-id
                 # Authentication is handled via CLOUDFLARE_ACCOUNT_ID env var
+                print(f"[Pages] Running: npx wrangler pages domain add {custom_domain} --project-name {project_name}")
                 domain_result = subprocess.run(
                     [
                         "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
@@ -2197,6 +2207,12 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     timeout=90
                 )
                 
+                print(f"[Pages] Domain add exit code: {domain_result.returncode}", flush=True)
+                if domain_result.stdout:
+                    print(f"[Pages] Domain add stdout: {domain_result.stdout[:1000]}", flush=True)
+                if domain_result.stderr:
+                    print(f"[Pages] Domain add stderr: {domain_result.stderr[:1000]}", flush=True)
+                
                 if domain_result.returncode == 0:
                     print(f"[Pages] ✅ Custom domain added to Pages via Wrangler: {custom_domain}")
                     domain_attached = True
@@ -2207,36 +2223,74 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     stderr_output = domain_result.stderr or ""
                     
                     # Check if domain already exists (success case)
-                    if any(phrase in error_output for phrase in ["already", "already exists", "already configured", "is already"]):
+                    if any(phrase in error_output for phrase in ["already", "already exists", "already configured", "is already", "already attached"]):
                         print(f"[Pages] ✅ Custom domain already attached (that's OK)")
                         domain_attached = True
                         break
                     else:
                         print(f"[Pages] Domain attachment attempt {domain_attempt + 1} failed:")
                         if stdout_output:
-                            print(f"[Pages] stdout: {stdout_output[:300]}")
+                            print(f"[Pages] stdout: {stdout_output[:500]}")
                         if stderr_output:
-                            print(f"[Pages] stderr: {stderr_output[:300]}")
+                            print(f"[Pages] stderr: {stderr_output[:500]}")
                         
                         # Check if it's a retryable error
                         is_retryable = any(code in error_output for code in [
                             "timeout", "network", "temporary", "service unavailable", 
-                            "rate limit", "429", "500", "502", "503", "504"
+                            "rate limit", "429", "500", "502", "503", "504", "dns", "not found"
                         ])
                         
                         if not is_retryable or domain_attempt == max_domain_retries - 1:
                             # Non-retryable error or last attempt
                             print(f"[Pages] ⚠️ Wrangler domain attachment failed after {domain_attempt + 1} attempts")
+                            print(f"[Pages] ⚠️ Full error: {stderr_output[:1000] if stderr_output else stdout_output[:1000]}")
                             print(f"[Pages] ⚠️ You can manually add it via:")
                             print(f"[Pages] ⚠️   npx wrangler pages domain add {custom_domain} --project-name {project_name}")
                             print(f"[Pages] ⚠️ Or in Cloudflare dashboard: https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
                             break
+            
+            # Fallback: Try using Cloudflare API directly if Wrangler failed
+            if not domain_attached:
+                print(f"[Pages] Wrangler failed to attach domain, trying Cloudflare API directly...")
+                try:
+                    api_response = req.post(
+                        f"https://api.cloudflare.com/client/v4/accounts/{account_id}/pages/projects/{project_name}/domains",
+                        headers={
+                            "Authorization": f"Bearer {api_token}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "domain": custom_domain
+                        },
+                        timeout=30
+                    )
+                    
+                    if api_response.status_code in [200, 201]:
+                        print(f"[Pages] ✅ Custom domain added via Cloudflare API: {custom_domain}")
+                        domain_attached = True
+                    else:
+                        api_result = api_response.json()
+                        if api_result.get("errors"):
+                            error_msg = api_result["errors"][0].get("message", "Unknown error")
+                            error_code = api_result["errors"][0].get("code", "unknown")
+                            # Check if domain already exists
+                            if error_code == 1004 or "already" in error_msg.lower():
+                                print(f"[Pages] ✅ Custom domain already attached via API check")
+                                domain_attached = True
+                            else:
+                                print(f"[Pages] ⚠️ API domain attachment failed: {error_code} - {error_msg}")
+                        else:
+                            print(f"[Pages] ⚠️ API domain attachment failed: {api_response.status_code}")
+                except Exception as api_err:
+                    print(f"[Pages] ⚠️ Exception using Cloudflare API: {api_err}")
             
             if not domain_attached:
                 print(f"[Pages] ⚠️ Could not attach domain automatically, but deployment succeeded")
                 print(f"[Pages] ⚠️ The site is available at: {deployment_url}")
                 print(f"[Pages] ⚠️ To attach the custom domain, run:")
                 print(f"[Pages] ⚠️   npx wrangler pages domain add {custom_domain} --project-name {project_name}")
+                print(f"[Pages] ⚠️ Or add manually in Cloudflare dashboard:")
+                print(f"[Pages] ⚠️   https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
             
             # Step 3: Verify DNS record exists and is correct
             if dns_created and zone_id:
