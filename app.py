@@ -1592,7 +1592,31 @@ def deploy_pages():
         if not project_name or not subdomain or not files:
             return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
         
-        # Validate that subdomain matches project_name pattern
+        # Ensure subdomain format matches environment:
+        # - Dev: should have "dev-" prefix (e.g., "dev-vibe-123")
+        # - Prod: should NOT have "dev-" prefix (e.g., "vibe-123")
+        if environment == "dev":
+            if not subdomain.startswith("dev-"):
+                # Add "dev-" prefix if missing
+                original_subdomain = subdomain
+                subdomain = f"dev-{subdomain}"
+                print(f"[Pages] Added 'dev-' prefix to subdomain: {original_subdomain} -> {subdomain}")
+            # Ensure project_name also has "dev-" prefix for consistency
+            if not project_name.startswith("dev-"):
+                project_name = f"dev-{project_name}"
+                print(f"[Pages] Added 'dev-' prefix to project_name: {project_name}")
+        else:  # prod
+            if subdomain.startswith("dev-"):
+                # Remove "dev-" prefix for prod
+                original_subdomain = subdomain
+                subdomain = subdomain.replace("dev-", "", 1)
+                print(f"[Pages] Removed 'dev-' prefix from subdomain: {original_subdomain} -> {subdomain}")
+            # Ensure project_name doesn't have "dev-" prefix for prod
+            if project_name.startswith("dev-"):
+                project_name = project_name.replace("dev-", "", 1)
+                print(f"[Pages] Removed 'dev-' prefix from project_name: {project_name}")
+        
+        # Validate that subdomain matches project_name pattern (after prefix adjustments)
         if subdomain != project_name:
             return jsonify({
                 'error': f'Subdomain "{subdomain}" must match project_name "{project_name}" for consistency'
@@ -1885,6 +1909,9 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
                 print(f"[Pages] Note: Preview environment will be created automatically when deploying to 'preview' branch")
                 project_creation_success = True
+                # Small delay to ensure project is fully ready
+                import time
+                time.sleep(2)
                 break
             elif "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
                 print(f"[Pages] ✅ Cloudflare Pages project already exists: {project_name} (that's OK)")
@@ -1895,17 +1922,27 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 error_output = result.stderr or result.stdout or "No error output available"
                 print(f"[Pages] Project creation attempt {attempt + 1} failed: {error_output[:500]}")
                 if attempt == max_project_retries - 1:
-                    # On last attempt, if it's not a clear "already exists" error, we'll still try to deploy
-                    # Sometimes the project exists but the error message isn't clear
-                    print(f"[Pages] ⚠️ Project creation failed after {max_project_retries} attempts")
-                    print(f"[Pages] ⚠️ Will attempt deployment anyway - project may already exist")
-                    # Don't return error, let deployment attempt proceed
-                    # If project doesn't exist, deployment will fail with a clear error
-                    break
+                    # Last attempt failed - return error instead of proceeding
+                    print(f"[Pages] ❌ Project creation failed after {max_project_retries} attempts")
+                    return jsonify({
+                        'error': f'Failed to create Cloudflare Pages project after {max_project_retries} attempts: {error_output[:500]}',
+                        'details': {
+                            'exit_code': result.returncode,
+                            'stderr': result.stderr[:1000] if result.stderr else None,
+                            'stdout': result.stdout[:1000] if result.stdout else None,
+                            'project_name': project_name
+                        }
+                    }), 500
         
         if not project_creation_success:
-            print(f"[Pages] ⚠️ Could not confirm project creation, but proceeding with deployment")
-            print(f"[Pages] ⚠️ If project doesn't exist, deployment will fail with a clear error message")
+            print(f"[Pages] ❌ Could not create or verify Cloudflare Pages project exists")
+            return jsonify({
+                'error': 'Failed to create Cloudflare Pages project before deployment',
+                'project_name': project_name,
+                'message': 'The Pages project must be created before deployment can proceed'
+            }), 500
+        
+        print(f"[Pages] ✅ Project creation confirmed, proceeding with deployment...")
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
         # For dev: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
