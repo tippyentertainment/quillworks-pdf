@@ -1,0 +1,39 @@
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Documentation
+*.md
+!README.md
+
+# Temp files
+*.log
+*.tmp
+.DS_Store
+
+# Test files
+tests/
+test_*.py
+*_test.py
+
+
+# Test files
+tests/
+test_*.py
+*_test.py

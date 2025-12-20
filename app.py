@@ -1819,7 +1819,52 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                             missing_packages = list(set([pkg for pkg in missing_packages if not pkg.startswith('@types/')]))
                             if missing_packages:
                                 print(f"[Pages] Detected missing packages: {missing_packages}", flush=True)
-                                print(f"[Pages] Attempting to install missing packages...", flush=True)
+                                
+                                # Check which packages are actually missing from package.json
+                                existing_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                                packages_to_add = [pkg for pkg in missing_packages if pkg not in existing_deps]
+                                
+                                if packages_to_add:
+                                    print(f"[Pages] Adding missing packages to package.json: {packages_to_add}", flush=True)
+                                    
+                                    # Determine which packages go to dependencies vs devDependencies
+                                    # Build-time packages (types, build tools) go to devDependencies
+                                    # Runtime packages go to dependencies
+                                    dev_dep_keywords = ['@types/', 'typescript', 'ts-', 'eslint', 'prettier', 'vite', 'webpack', 'rollup', 'babel']
+                                    runtime_packages = []
+                                    dev_packages = []
+                                    
+                                    for pkg_name in packages_to_add:
+                                        # Check if it's a dev dependency (build tool, type definitions, etc.)
+                                        is_dev_dep = any(keyword in pkg_name.lower() for keyword in dev_dep_keywords)
+                                        if is_dev_dep:
+                                            dev_packages.append(pkg_name)
+                                        else:
+                                            runtime_packages.append(pkg_name)
+                                    
+                                    # Add runtime packages to dependencies
+                                    if runtime_packages:
+                                        if "dependencies" not in pkg:
+                                            pkg["dependencies"] = {}
+                                        for pkg_name in runtime_packages:
+                                            pkg["dependencies"][pkg_name] = "latest"
+                                        print(f"[Pages] Adding to dependencies: {runtime_packages}", flush=True)
+                                    
+                                    # Add build-time packages to devDependencies
+                                    if dev_packages:
+                                        if "devDependencies" not in pkg:
+                                            pkg["devDependencies"] = {}
+                                        for pkg_name in dev_packages:
+                                            pkg["devDependencies"][pkg_name] = "latest"
+                                        print(f"[Pages] Adding to devDependencies: {dev_packages}", flush=True)
+                                    
+                                    # Write updated package.json
+                                    with open(package_json_path, 'w', encoding='utf-8') as f:
+                                        json.dump(pkg, f, indent=2)
+                                    print(f"[Pages] ✅ Updated package.json with missing packages", flush=True)
+                                
+                                # Install all missing packages (including ones that might be in package.json but not installed)
+                                print(f"[Pages] Installing missing packages: {missing_packages}", flush=True)
                                 install_result = subprocess.run(
                                     ["npm", "install", "--legacy-peer-deps"] + missing_packages,
                                     cwd=temp_dir,
@@ -1830,10 +1875,37 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                                 )
                                 if install_result.returncode == 0:
                                     print(f"[Pages] ✅ Installed missing packages: {', '.join(missing_packages)}", flush=True)
+                                    # Update package.json with actual installed versions from package-lock.json
+                                    package_lock_path = os.path.join(temp_dir, "package-lock.json")
+                                    if os.path.exists(package_lock_path):
+                                        try:
+                                            with open(package_lock_path, 'r', encoding='utf-8') as f:
+                                                package_lock = json.load(f)
+                                            # Update versions in package.json from package-lock.json
+                                            if "packages" in package_lock:
+                                                for pkg_name in packages_to_add:
+                                                    pkg_key = f"node_modules/{pkg_name}" if not pkg_name.startswith("@") else f"node_modules/{pkg_name.replace('/', '/')}"
+                                                    if pkg_key in package_lock.get("packages", {}):
+                                                        installed_version = package_lock["packages"][pkg_key].get("version", "latest")
+                                                        # Update in the correct section (dependencies or devDependencies)
+                                                        if pkg_name in pkg.get("dependencies", {}):
+                                                            pkg["dependencies"][pkg_name] = installed_version
+                                                        elif pkg_name in pkg.get("devDependencies", {}):
+                                                            pkg["devDependencies"][pkg_name] = installed_version
+                                                # Write back with actual versions
+                                                with open(package_json_path, 'w', encoding='utf-8') as f:
+                                                    json.dump(pkg, f, indent=2)
+                                                print(f"[Pages] ✅ Updated package.json with installed versions", flush=True)
+                                        except Exception as lock_err:
+                                            print(f"[Pages] ⚠️ Could not update versions from package-lock.json: {lock_err}", flush=True)
+                                    
                                     build_retry_count += 1
                                     continue  # Retry build
                                 else:
                                     print(f"[Pages] ⚠️ Failed to install missing packages: {install_result.stderr[:500]}", flush=True)
+                            else:
+                                print(f"[Pages] All missing packages are already in package.json, but build still fails", flush=True)
+                                print(f"[Pages] This might indicate a different issue (version conflict, peer dependency, etc.)", flush=True)
                     
                     # Check for TypeScript implicit 'any' errors and relax strictness
                     if "TS7031" in error_output and "implicitly has an 'any' type" in error_output:
