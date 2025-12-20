@@ -1640,6 +1640,23 @@ def deploy_pages():
             build_path = temp_dir
             print(f"[Pages] No {output_dir} directory, using project root")
         
+        # Create the Pages project first (if it doesn't exist)
+        print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
+        result = subprocess.run(
+            [
+                "npx", "wrangler", "pages", "project", "create", project_name,
+                "--production-branch", "main"
+            ],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120
+        )
+        # Ignore error if project already exists
+        if result.returncode != 0 and "already exists" not in result.stderr.lower():
+            print(f"[Pages] Project creation output: {result.stderr}")
+        
         # Deploy to Cloudflare Pages using Wrangler
         print(f"[Pages] Deploying to Cloudflare Pages: {project_name}")
         result = subprocess.run(
