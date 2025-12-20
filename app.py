@@ -1597,6 +1597,7 @@ def deploy_pages():
         # Detect framework and build
         package_json_path = os.path.join(temp_dir, "package.json")
         output_dir = "dist"
+        is_react_app = False
         
         if os.path.exists(package_json_path):
             with open(package_json_path) as f:
@@ -1609,6 +1610,25 @@ def deploy_pages():
                 output_dir = "out"  # Next.js static export
             elif "vite" in deps or "react" in deps:
                 output_dir = "dist"
+                is_react_app = True
+            
+            # Automatically add _redirects file for React/Vite apps for client-side routing
+            if is_react_app:
+                # Check if _redirects already exists in files
+                has_redirects = any(f.get('path', '').endswith('_redirects') or 
+                                   f.get('path', '').endswith('public/_redirects') for f in files)
+                
+                if not has_redirects:
+                    # Create _redirects file in public folder (Vite/CRA standard)
+                    public_dir = os.path.join(temp_dir, "public")
+                    os.makedirs(public_dir, exist_ok=True)
+                    redirects_path = os.path.join(public_dir, "_redirects")
+                    
+                    # Cloudflare Pages redirect rule: all routes -> index.html with 200 status
+                    with open(redirects_path, 'w', encoding='utf-8') as f:
+                        f.write("/*    /index.html   200\n")
+                    
+                    print(f"[Pages] ✅ Created _redirects file for client-side routing", flush=True)
             
             # Install dependencies
             print(f"[Pages] Running npm install...", flush=True)
@@ -1644,6 +1664,18 @@ def deploy_pages():
             # Fall back to current directory if build output doesn't exist
             build_path = temp_dir
             print(f"[Pages] No {output_dir} directory, using project root", flush=True)
+        
+        # Ensure _redirects file is in build output for React/Vite apps
+        if is_react_app:
+            redirects_in_build = os.path.join(build_path, "_redirects")
+            redirects_in_public = os.path.join(temp_dir, "public", "_redirects")
+            
+            # Copy _redirects to build output if it doesn't exist there
+            if not os.path.exists(redirects_in_build) and os.path.exists(redirects_in_public):
+                shutil.copy2(redirects_in_public, redirects_in_build)
+                print(f"[Pages] ✅ Copied _redirects to build output", flush=True)
+            elif os.path.exists(redirects_in_build):
+                print(f"[Pages] ✅ _redirects file found in build output", flush=True)
         
         # Create the Pages project first (if it doesn't exist)
         print(f"[Pages] Creating Cloudflare Pages project: {project_name}", flush=True)
