@@ -1587,6 +1587,7 @@ def deploy_pages():
         cf_account_id = data.get('cf_account_id')
         cf_api_token = data.get('cf_api_token')
         cf_zone_id = data.get('cf_zone_id')
+        environment = data.get('environment', 'prod')  # 'dev' or 'prod'
         
         if not project_name or not subdomain or not files:
             return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
@@ -1783,6 +1784,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 print(f"[Pages] ✅ _redirects file found in build output")
         
         # Create the Pages project first (if it doesn't exist)
+        # Cloudflare Pages automatically creates preview environments for non-production branches
         print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
         max_project_retries = 3
         project_creation_success = False
@@ -1831,7 +1833,11 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             return jsonify({'error': 'Failed to create Cloudflare Pages project before deployment'}), 500
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
-        print(f"[Pages] Deploying to Cloudflare Pages: {project_name}")
+        # For dev: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
+        # For prod: Creates/updates vibe-*.quillworks.org (Production Environment, main branch) - opened via "View Live App"
+        branch_used = "preview" if environment == "dev" else "main"
+        print(f"[Pages] Deploying to Cloudflare Pages ({environment} environment, {branch_used} branch): {project_name}")
+        print(f"[Pages] Custom domain: {subdomain}.quillworks.org")
         max_retries = 3
         retry_delay = 5  # seconds
         deployment_url = None
@@ -1842,11 +1848,17 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 import time
                 time.sleep(retry_delay)
             
+            # Use Cloudflare Pages Preview Environment for dev, Production for prod
+            # Preview deployments: Use "preview" branch (creates preview environment automatically)
+            # Production deployments: Use "main" branch (production environment)
+            deployment_branch = "preview" if environment == "dev" else "main"
+            print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
+            
             result = subprocess.run(
                 [
                     "npx", "wrangler", "pages", "deploy", build_path,
                     "--project-name", project_name,
-                    "--branch", "main",
+                    "--branch", deployment_branch,
                     "--commit-dirty=true",
                     "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
                 ],
@@ -1886,9 +1898,15 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
         
         # deployment_url is now set in the retry loop above
         
-        # Add custom domain to the Pages project
+        # Add/verify custom domain is attached to the Pages project
+        # Dev: dev-vibe-*.quillworks.org (Preview Environment, preview branch) - for coding in iframe
+        # Prod: vibe-*.quillworks.org (Production Environment, main branch) - for live app
         custom_domain = f"{subdomain}.quillworks.org"
-        print(f"[Pages] Adding custom domain: {custom_domain}")
+        branch_used = "preview" if environment == "dev" else "main"
+        print(f"[Pages] Environment: {environment} (branch: {branch_used})")
+        print(f"[Pages] Custom domain: {custom_domain}")
+        print(f"[Pages] Deployment URL: {deployment_url}")
+        print(f"[Pages] This {environment} deployment will be accessible at {custom_domain}")
         
         import requests as req
         api_token = env.get("CLOUDFLARE_API_TOKEN")
@@ -2035,7 +2053,8 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             "success": True,
             "url": deployment_url,
             "project_name": project_name,
-            "custom_domain": custom_domain
+            "custom_domain": custom_domain,
+            "environment": environment  # 'dev' or 'prod'
         })
         
     except subprocess.TimeoutExpired:
@@ -2083,7 +2102,8 @@ def attach_domain():
         result = subprocess.run(
             [
                 "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
-                "--project-name", project_name
+                "--project-name", project_name,
+                "--account-id", cf_account_id
             ],
             cwd=wrangler_cwd,
             capture_output=True,
