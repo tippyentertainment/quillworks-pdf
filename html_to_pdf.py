@@ -15,6 +15,16 @@ import requests
 # missing.
 WEASYPRINT_AVAILABLE = False
 
+# Try to import WeasyPrint at module level, but don't fail if it's not available
+try:
+    from weasyprint import HTML, CSS
+    from weasyprint.text.fonts import FontConfiguration
+    WEASYPRINT_AVAILABLE = True
+except ImportError:
+    WEASYPRINT_AVAILABLE = False
+    HTML = None
+    CSS = None
+    FontConfiguration = None
 
 
 def html_to_pdf(html_content, base_url=None):
