@@ -1886,9 +1886,12 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 time.sleep(5)
             
             print(f"[Pages] Attempting to create project (attempt {attempt + 1}/{max_project_retries})...")
+            print(f"[Pages] Project name: {project_name}")
+            print(f"[Pages] Account ID: {cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}")
+            # Use --yes flag to avoid interactive prompts, and use @latest to ensure we have the latest wrangler
             result = subprocess.run(
                 [
-                    "npx", "wrangler", "pages", "project", "create", project_name,
+                    "npx", "--yes", "wrangler@latest", "pages", "project", "create", project_name,
                     "--production-branch", "main",
                     "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
                 ],
@@ -1899,12 +1902,17 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 timeout=120
             )
             
-            print(f"[Pages] Project create exit code: {result.returncode}")
+            print(f"[Pages] Project create exit code: {result.returncode}", flush=True)
             if result.stdout:
-                print(f"[Pages] Project create stdout: {result.stdout[:500]}")
+                print(f"[Pages] Project create stdout (first 1000 chars): {result.stdout[:1000]}", flush=True)
+                if len(result.stdout) > 1000:
+                    print(f"[Pages] ... (stdout truncated, total length: {len(result.stdout)})", flush=True)
             if result.stderr:
-                print(f"[Pages] Project create stderr: {result.stderr[:500]}")
+                print(f"[Pages] Project create stderr (first 1000 chars): {result.stderr[:1000]}", flush=True)
+                if len(result.stderr) > 1000:
+                    print(f"[Pages] ... (stderr truncated, total length: {len(result.stderr)})", flush=True)
             
+            # Check for success (returncode 0)
             if result.returncode == 0:
                 print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
                 print(f"[Pages] Note: Preview environment will be created automatically when deploying to 'preview' branch")
@@ -1913,33 +1921,56 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 import time
                 time.sleep(2)
                 break
-            elif "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
+            
+            # Check for "already exists" - this is actually success (project already created)
+            error_output_lower = (result.stderr or result.stdout or "").lower()
+            if any(phrase in error_output_lower for phrase in [
+                "already exists", "already exists", "already configured", "is already",
+                "duplicate", "conflict", "name is already taken"
+            ]):
                 print(f"[Pages] ✅ Cloudflare Pages project already exists: {project_name} (that's OK)")
                 print(f"[Pages] Will deploy to {'preview' if environment == 'dev' else 'main'} branch")
                 project_creation_success = True
                 break
-            else:
-                error_output = result.stderr or result.stdout or "No error output available"
-                print(f"[Pages] Project creation attempt {attempt + 1} failed: {error_output[:500]}")
-                if attempt == max_project_retries - 1:
-                    # Last attempt failed - return error instead of proceeding
-                    print(f"[Pages] ❌ Project creation failed after {max_project_retries} attempts")
-                    return jsonify({
-                        'error': f'Failed to create Cloudflare Pages project after {max_project_retries} attempts: {error_output[:500]}',
-                        'details': {
-                            'exit_code': result.returncode,
-                            'stderr': result.stderr[:1000] if result.stderr else None,
-                            'stdout': result.stdout[:1000] if result.stdout else None,
-                            'project_name': project_name
-                        }
-                    }), 500
+            
+            # Check for retryable errors (network, rate limit, service unavailable)
+            error_output = result.stderr or result.stdout or "No error output available"
+            is_retryable = any(code in error_output_lower for code in [
+                "timeout", "network", "temporary", "service unavailable", 
+                "rate limit", "429", "500", "502", "503", "504", "7010"
+            ])
+            
+            print(f"[Pages] Project creation attempt {attempt + 1} failed (exit code {result.returncode}): {error_output[:500]}")
+            
+            if not is_retryable or attempt == max_project_retries - 1:
+                # Non-retryable error or last attempt failed
+                print(f"[Pages] ❌ Project creation failed after {attempt + 1} attempts")
+                print(f"[Pages] Full error output: {error_output[:2000]}")
+                return jsonify({
+                    'error': f'Failed to create Cloudflare Pages project: {error_output[:500]}',
+                    'details': {
+                        'exit_code': result.returncode,
+                        'stderr': result.stderr[:2000] if result.stderr else None,
+                        'stdout': result.stdout[:2000] if result.stdout else None,
+                        'project_name': project_name,
+                        'attempts': attempt + 1,
+                        'is_retryable': is_retryable
+                    },
+                    'manual_command': f'npx wrangler pages project create {project_name} --production-branch main --account-id {cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")}'
+                }), 500
         
         if not project_creation_success:
             print(f"[Pages] ❌ Could not create or verify Cloudflare Pages project exists")
+            print(f"[Pages] Project name: {project_name}")
+            print(f"[Pages] Environment: {environment}")
+            print(f"[Pages] Account ID: {cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}")
             return jsonify({
                 'error': 'Failed to create Cloudflare Pages project before deployment',
                 'project_name': project_name,
-                'message': 'The Pages project must be created before deployment can proceed'
+                'environment': environment,
+                'message': 'The Pages project must be created before deployment can proceed',
+                'manual_command': f'npx wrangler pages project create {project_name} --production-branch main --account-id {cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")}',
+                'troubleshooting': 'Check: 1) Cloudflare API token has Pages:Edit permission, 2) Account ID is correct, 3) Project name is valid (alphanumeric, hyphens, underscores only)'
             }), 500
         
         print(f"[Pages] ✅ Project creation confirmed, proceeding with deployment...")
@@ -2303,6 +2334,7 @@ def attach_domain():
         custom_domain = data.get('custom_domain')
         cf_account_id = data.get('cf_account_id') or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
         cf_api_token = data.get('cf_api_token') or os.environ.get("CLOUDFLARE_API_TOKEN")
+        cf_zone_id = data.get('cf_zone_id') or os.environ.get("CLOUDFLARE_ZONE_ID")
         
         if not project_name or not custom_domain:
             return jsonify({'error': 'Missing required fields: project_name, custom_domain'}), 400
@@ -2318,6 +2350,7 @@ def attach_domain():
         env = os.environ.copy()
         env["CLOUDFLARE_API_TOKEN"] = cf_api_token
         env["CLOUDFLARE_ACCOUNT_ID"] = cf_account_id
+        env["CLOUDFLARE_ZONE_ID"] = cf_zone_id
         
         # Use home directory or temp for Wrangler (doesn't need project files)
         wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
