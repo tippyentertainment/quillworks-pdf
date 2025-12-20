@@ -6,3 +6,4 @@ aptPkgs = [
     "libffi-dev",
     "shared-mime-info"
 ]
+nixPkgs = ["nodejs-18_x", "python312"]
