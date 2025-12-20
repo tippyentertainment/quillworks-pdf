@@ -1,22 +1,22 @@
 # Core web framework
-flask==3.0.0
-gunicorn==21.2.0
-python-dotenv==1.0.0
+flask==3.1.2
+gunicorn==23.0.0
+python-dotenv==1.2.1
 
 # PDF generation and processing
 reportlab==4.4.6
-weasyprint==60.1
-pypdf==3.17.1
-pdfplumber==0.10.3
-pdf2image==1.16.3
+weasyprint==67.0
+pypdf==6.4.2
+pdfplumber==0.11.8
+pdf2image==1.17.0
 
 # Document generation
-python-docx==1.1.0
-ebooklib==0.18
+python-docx==1.2.0
+ebooklib==0.20
 
 # Image processing
-pillow==11.0.0
+pillow==12.0.0
 rembg==2.0.69
 
 # HTTP requests
-requests==2.31.0
+requests==2.32.5
