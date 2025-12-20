@@ -89,12 +89,12 @@ _rembg_remove = None
 def get_rembg_remove():
     global _rembg_remove, REMBG_AVAILABLE
     if _rembg_remove is None:
-        try:
-            from rembg import remove
+try:
+    from rembg import remove
             _rembg_remove = remove
-        except ImportError:
-            REMBG_AVAILABLE = False
-            print("WARNING: rembg not available")
+except ImportError:
+    REMBG_AVAILABLE = False
+    print("WARNING: rembg not available")
     return _rembg_remove
 
 try:
@@ -1785,7 +1785,10 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
         
         # Create the Pages project first (if it doesn't exist)
         # Cloudflare Pages automatically creates preview environments for non-production branches
+        # When we deploy to "preview" branch, it creates a preview environment automatically
+        # When we deploy to "main" branch, it uses the production environment
         print(f"[Pages] Creating Cloudflare Pages project: {project_name}")
+        print(f"[Pages] Production branch: main (preview branch will create preview environment automatically)")
         max_project_retries = 3
         project_creation_success = False
         
@@ -1795,25 +1798,27 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 import time
                 time.sleep(5)
             
-            result = subprocess.run(
-                [
-                    "npx", "wrangler", "pages", "project", "create", project_name,
+        result = subprocess.run(
+            [
+                "npx", "wrangler", "pages", "project", "create", project_name,
                     "--production-branch", "main",
                     "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=120
-            )
+            ],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120
+        )
             
             if result.returncode == 0:
                 print(f"[Pages] ✅ Cloudflare Pages project created: {project_name}")
+                print(f"[Pages] Note: Preview environment will be created automatically when deploying to 'preview' branch")
                 project_creation_success = True
                 break
             elif "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
                 print(f"[Pages] Cloudflare Pages project already exists: {project_name} (that's OK)")
+                print(f"[Pages] Will deploy to {'preview' if environment == 'dev' else 'main'} branch")
                 project_creation_success = True
                 break
             else:
@@ -1854,28 +1859,40 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             deployment_branch = "preview" if environment == "dev" else "main"
             print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
             
-            result = subprocess.run(
-                [
-                    "npx", "wrangler", "pages", "deploy", build_path,
-                    "--project-name", project_name,
+        result = subprocess.run(
+            [
+                "npx", "wrangler", "pages", "deploy", build_path,
+                "--project-name", project_name,
                     "--branch", deployment_branch,
                     "--commit-dirty=true",
                     "--account-id", cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-                ],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=300
-            )
-            
+            ],
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=300
+        )
+        
             if result.returncode == 0:
                 # Success - parse deployment URL
-                for line in result.stdout.split('\n'):
-                    if 'https://' in line and '.pages.dev' in line:
-                        deployment_url = line.strip()
-                        break
-                print(f"[Pages] ✅ Deployed successfully: {deployment_url}")
+        for line in result.stdout.split('\n'):
+            if 'https://' in line and '.pages.dev' in line:
+                deployment_url = line.strip()
+                break
+        
+                if deployment_url:
+                    print(f"[Pages] ✅ Deployed successfully to {environment} environment: {deployment_url}")
+                    if environment == "dev":
+                        print(f"[Pages] Preview environment created/updated at: {deployment_url}")
+                        print(f"[Pages] This is the preview environment (preview branch) - shown in iframe for coding")
+                    else:
+                        print(f"[Pages] Production environment deployed at: {deployment_url}")
+                        print(f"[Pages] This is the production environment (main branch) - opened via 'View Live App'")
+                else:
+                    print(f"[Pages] ⚠️ Deployment succeeded but couldn't parse deployment URL from output")
+                    print(f"[Pages] Full output: {result.stdout[:500]}")
+                
                 break
             else:
                 error_msg = result.stderr or result.stdout or ""
@@ -1923,7 +1940,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                 # First, check if DNS record already exists
                 try:
                     check_response = req.get(
-                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
                         headers={
                             "Authorization": f"Bearer {api_token}",
                             "Content-Type": "application/json"
@@ -1944,15 +1961,15 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                                 # Update existing record
                                 update_response = req.put(
                                     f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{existing_record['id']}",
-                                    headers={
-                                        "Authorization": f"Bearer {api_token}",
-                                        "Content-Type": "application/json"
-                                    },
-                                    json={
-                                        "type": "CNAME",
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "type": "CNAME",
                                         "name": subdomain,
-                                        "content": pages_dev_url,
-                                        "proxied": True
+                    "content": pages_dev_url,
+                    "proxied": True
                                     },
                                     timeout=30
                                 )
@@ -1979,20 +1996,20 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                                 "content": pages_dev_url,  # Points to project_name.pages.dev
                                 "proxied": True,  # Enable Cloudflare proxy (orange cloud)
                                 "ttl": 1  # Auto TTL
-                            },
-                            timeout=30
-                        )
-                        
-                        if dns_response.status_code in [200, 201]:
+                },
+                timeout=30
+            )
+            
+            if dns_response.status_code in [200, 201]:
                             print(f"[Pages] ✅ DNS CNAME created: {custom_domain} -> {pages_dev_url}")
                             dns_created = True
-                        else:
-                            dns_result = dns_response.json()
-                            # Check if record already exists (code 81057)
-                            if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
+            else:
+                dns_result = dns_response.json()
+                # Check if record already exists (code 81057)
+                if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
                                 print(f"[Pages] ✅ DNS record already exists (that's OK)")
                                 dns_created = True
-                            else:
+                else:
                                 error_msg = dns_result.get("errors", [{}])[0].get("message", "Unknown error")
                                 print(f"[Pages] ❌ DNS creation failed: {dns_response.status_code} - {error_msg}")
                                 print(f"[Pages] Full response: {dns_response.text[:500]}")
@@ -2087,13 +2104,13 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                     print(f"[Pages] Verifying DNS record...")
                     verify_dns = req.get(
                         f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
-                        headers={
-                            "Authorization": f"Bearer {api_token}",
-                            "Content-Type": "application/json"
-                        },
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json"
+                },
                         params={"name": custom_domain, "type": "CNAME"},
-                        timeout=30
-                    )
+                timeout=30
+            )
                     if verify_dns.status_code == 200:
                         dns_records = verify_dns.json().get("result", [])
                         if dns_records:
@@ -2126,7 +2143,7 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
                         domain_names = [d.get("domain", "") for d in domains if isinstance(d, dict)]
                         if custom_domain in domain_names:
                             print(f"[Pages] ✅ Verified: Custom domain is attached to Pages project")
-                        else:
+            else:
                             print(f"[Pages] ⚠️ Warning: Custom domain not found in attached domains list")
                             print(f"[Pages] ⚠️ Attached domains: {domain_names}")
                             print(f"[Pages] ⚠️ It may take a few moments to propagate. If it doesn't appear, add manually:")
@@ -2142,12 +2159,18 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
             import traceback
             traceback.print_exc()
         
+        # Return deployment information
+        # For dev: returns dev-vibe-*.pages.dev URL and dev-vibe-*.quillworks.org custom domain
+        # For prod: returns vibe-*.pages.dev URL and vibe-*.quillworks.org custom domain
         return jsonify({
             "success": True,
-            "url": deployment_url,
+            "url": deployment_url,  # .pages.dev URL (e.g., dev-vibe-*.pages.dev or vibe-*.pages.dev)
             "project_name": project_name,
-            "custom_domain": custom_domain,
-            "environment": environment  # 'dev' or 'prod'
+            "custom_domain": custom_domain,  # Custom domain (e.g., dev-vibe-*.quillworks.org or vibe-*.quillworks.org)
+            "environment": environment,  # 'dev' or 'prod'
+            "pages_dev_url": deployment_url if environment == "dev" else None,  # Explicit dev .pages.dev URL
+            "pages_prod_url": deployment_url if environment == "prod" else None,  # Explicit prod .pages.dev URL
+            "custom_domain_url": f"https://{custom_domain}"  # Full custom domain URL
         })
         
     except subprocess.TimeoutExpired:
