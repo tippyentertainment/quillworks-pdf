@@ -1551,8 +1551,14 @@ def deploy_pages():
         cf_api_token = data.get('cf_api_token')
         cf_zone_id = data.get('cf_zone_id')
         
-        if not project_name or not subdomain or not files or not cf_account_id or not cf_api_token:
-            return jsonify({'error': 'Missing required fields: project_name, subdomain, files, cf_account_id, cf_api_token'}), 400
+        if not project_name or not subdomain or not files:
+            return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
+        
+        # Check for Cloudflare credentials (from request or environment)
+        has_api_token = cf_api_token or os.environ.get("CLOUDFLARE_API_TOKEN")
+        has_account_id = cf_account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        if not has_api_token or not has_account_id:
+            return jsonify({'error': 'Missing Cloudflare credentials. Provide cf_account_id and cf_api_token in request or set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN environment variables'}), 400
         
         # Create temp directory for project files
         temp_dir = tempfile.mkdtemp(prefix=f"pages-{project_name}-")
@@ -1569,8 +1575,10 @@ def deploy_pages():
         
         # Set environment variables for Wrangler
         env = os.environ.copy()
-        env["CLOUDFLARE_API_TOKEN"] = cf_api_token
-        env["CLOUDFLARE_ACCOUNT_ID"] = cf_account_id
+        env["CLOUDFLARE_API_TOKEN"] = os.environ.get("CLOUDFLARE_API_TOKEN") or cf_api_token
+        env["CLOUDFLARE_ACCOUNT_ID"] = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or cf_account_id
+        if cf_zone_id or os.environ.get("CLOUDFLARE_ZONE_ID"):
+            env["CLOUDFLARE_ZONE_ID"] = os.environ.get("CLOUDFLARE_ZONE_ID") or cf_zone_id
         
         # Detect framework and build
         package_json_path = os.path.join(temp_dir, "package.json")
