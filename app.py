@@ -1767,25 +1767,64 @@ def deploy_pages():
         if result.returncode != 0 and "already exists" not in result.stderr.lower():
             print(f"[Pages] Project creation output: {result.stderr}", flush=True)
         
-        # Deploy to Cloudflare Pages using Wrangler
+        # Deploy to Cloudflare Pages using Wrangler with retry logic
         print(f"[Pages] Deploying to Cloudflare Pages: {project_name}", flush=True)
-        result = subprocess.run(
-            [
-                "npx", "wrangler", "pages", "deploy", build_path,
-                "--project-name", project_name,
-                "--branch", "main",
-                "--commit-dirty=true"
-            ],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=300
-        )
         
-        if result.returncode != 0:
-            print(f"[Pages] Wrangler deploy failed: {result.stderr}", flush=True)
-            return jsonify({'error': f'Wrangler deploy failed: {result.stderr[:500]}'}), 500
+        max_retries = 3
+        deploy_success = False
+        result = None
+        
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                wait_time = attempt * 2  # Exponential backoff: 2s, 4s, 6s
+                print(f"[Pages] Retry attempt {attempt}/{max_retries} after {wait_time}s...", flush=True)
+                import time
+                time.sleep(wait_time)
+            
+            result = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "deploy", build_path,
+                    "--project-name", project_name,
+                    "--branch", "main",
+                    "--commit-dirty=true"
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=300
+            )
+            
+            if result.returncode == 0:
+                deploy_success = True
+                break
+            
+            # Check if it's a retryable error (service unavailable, rate limit, etc.)
+            error_output = result.stderr or result.stdout or ""
+            is_retryable = any(code in error_output for code in ["7010", "Service unavailable", "rate limit", "429"])
+            
+            if not is_retryable or attempt == max_retries:
+                # Non-retryable error or last attempt
+                break
+        
+        if not deploy_success:
+            error_output = result.stderr or result.stdout or "Unknown error"
+            print(f"[Pages] ❌ Wrangler deploy failed after {max_retries} attempts", flush=True)
+            print(f"[Pages] Error output: {error_output[:1000]}", flush=True)
+            
+            # Provide more helpful error messages
+            if "7010" in error_output or "Service unavailable" in error_output:
+                error_msg = "Cloudflare Pages service is temporarily unavailable. Please try again in a few moments."
+            elif "rate limit" in error_output.lower() or "429" in error_output:
+                error_msg = "Cloudflare API rate limit exceeded. Please wait a moment and try again."
+            else:
+                error_msg = f"Deployment failed: {error_output[:500]}"
+            
+            return jsonify({
+                'error': error_msg,
+                'details': error_output[:1000],
+                'attempts': max_retries
+            }), 500
         
         # Parse deployment URL from output
         deployment_url = None
