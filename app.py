@@ -1641,8 +1641,18 @@ def deploy_pages():
                 timeout=300  # 5 min timeout
             )
             if result.returncode != 0:
-                print(f"[Pages] npm install failed: {result.stderr}", flush=True)
-                return jsonify({'error': f'npm install failed: {result.stderr[:500]}'}), 500
+                error_output = result.stderr or result.stdout or "No error output available"
+                print(f"[Pages] npm install failed with return code: {result.returncode}", flush=True)
+                print(f"[Pages] npm install stderr: {result.stderr[:1000]}", flush=True)
+                print(f"[Pages] npm install stdout: {result.stdout[:1000]}", flush=True)
+                
+                error_msg = error_output[:1000] if error_output else "npm install failed with no output"
+                return jsonify({
+                    'error': f'npm install failed: {error_msg}',
+                    'return_code': result.returncode,
+                    'stderr': result.stderr[:500] if result.stderr else None,
+                    'stdout': result.stdout[:500] if result.stdout else None
+                }), 500
             
             # Run build
             print(f"[Pages] Running npm run build...", flush=True)
@@ -1655,8 +1665,20 @@ def deploy_pages():
                 timeout=300
             )
             if result.returncode != 0:
-                print(f"[Pages] Build failed: {result.stderr}", flush=True)
-                return jsonify({'error': f'Build failed: {result.stderr[:500]}'}), 500
+                # Capture both stdout and stderr for better error reporting
+                error_output = result.stderr or result.stdout or "No error output available"
+                print(f"[Pages] Build failed with return code: {result.returncode}", flush=True)
+                print(f"[Pages] Build stderr: {result.stderr[:1000]}", flush=True)
+                print(f"[Pages] Build stdout: {result.stdout[:1000]}", flush=True)
+                
+                # Provide more detailed error message
+                error_msg = error_output[:1000] if error_output else "Build command failed with no output"
+                return jsonify({
+                    'error': f'Build failed: {error_msg}',
+                    'return_code': result.returncode,
+                    'stderr': result.stderr[:500] if result.stderr else None,
+                    'stdout': result.stdout[:500] if result.stdout else None
+                }), 500
         
         # Check if output directory exists
         build_path = os.path.join(temp_dir, output_dir)
