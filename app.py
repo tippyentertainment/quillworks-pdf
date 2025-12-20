@@ -2145,11 +2145,13 @@ account_id = "{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}"
         account_id = env.get("CLOUDFLARE_ACCOUNT_ID")
         zone_id = env.get("CLOUDFLARE_ZONE_ID")
         
-        # Validate zone_id - it should be a hash, not a domain name
-        if zone_id and not zone_id.replace("-", "").replace("_", "").isalnum() and len(zone_id) < 20:
-            print(f"[Pages] ⚠️ Warning: zone_id looks invalid (got: {zone_id[:20]}...). Expected a zone ID hash, not a domain name.")
-            print(f"[Pages] ⚠️ Skipping DNS record creation. Please provide CLOUDFLARE_ZONE_ID as the zone ID hash.")
-            zone_id = None
+        # Validate zone_id - it should be a 32-char hex hash, not a domain name
+        if zone_id:
+            # Check if it looks like a domain (contains dot) or is too short for a zone ID
+            if '.' in zone_id or len(zone_id) < 20:
+                print(f"[Pages] ⚠️ Warning: zone_id looks invalid (got: {zone_id}). Expected a 32-char zone ID hash, not a domain name.")
+                print(f"[Pages] ⚠️ Skipping DNS record creation. Please provide CLOUDFLARE_ZONE_ID as the zone ID hash.")
+                zone_id = None
         
         try:
             # Step 1: Create/verify DNS CNAME record pointing to pages.dev
