@@ -2376,17 +2376,17 @@ def deploy_pages():
         # Production (prod): vibe-*.pages.dev OR custom domain (e.g., myapp.com)
         stable_pages_url = stable_url or deployment_url
         
-        # Final safety check for dev environment (should rarely trigger since we handle it in parsing above)
-        # Only log if we actually need to correct something that shouldn't have happened
+        # Final safety check for dev environment (silent fallback - parsing logic above should handle it)
+        # This only runs if parsing completely failed (stable_url is None or deployment_url doesn't have preview)
         if environment == "dev":
             if not stable_pages_url or "preview." not in stable_pages_url:
                 # Construct preview URL manually: preview.{project_name}.pages.dev
                 preview_url = f"https://preview.{project_name}.pages.dev"
-                # Only log if this is actually correcting an error (not if stable_url was never set)
-                if stable_url and stable_url != deployment_url:
-                    print(f"[Pages] ⚠️ Warning: Stable URL missing preview prefix, correcting to: {preview_url}")
+                # Silent correction - no logging to avoid contradictory messages
+                # The parsing logic above should have handled this correctly
                 stable_pages_url = preview_url
-                stable_url = preview_url  # Update stable_url for consistency
+                if not stable_url:
+                    stable_url = preview_url  # Only update if stable_url was never set
         
         return jsonify({
             "success": True,
