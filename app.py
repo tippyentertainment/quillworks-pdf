@@ -2229,13 +2229,14 @@ def deploy_pages():
                                 dns_name = custom_domain.split('.')[0]
                         
                         # Check if DNS record already exists
+                        # Use dns_name directly (e.g., "@" for root domains, "www" for subdomains, "vibe-123" for .quillworks.org)
                         check_response = req.get(
                             f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
                             headers={
                                 "Authorization": f"Bearer {api_token}",
                                 "Content-Type": "application/json"
                             },
-                            params={"name": custom_domain if dns_name == "@" else dns_name, "type": "CNAME"},
+                            params={"name": dns_name, "type": "CNAME"},
                             timeout=30
                         )
                         
