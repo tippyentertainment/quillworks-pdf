@@ -1587,28 +1587,19 @@ def deploy_pages():
         cf_account_id = data.get('cf_account_id')
         cf_api_token = data.get('cf_api_token')
         cf_zone_id = data.get('cf_zone_id')
-        environment_input = data.get('environment', 'prod')  # 'Preview', 'preview', 'dev', or 'prod'
-        
-        # Normalize environment: accept "Preview"/"preview"/"dev" as preview, everything else as prod
-        # But preserve the original for the response
-        environment_normalized = environment_input.lower()
-        is_preview = environment_normalized in ['preview', 'dev']
-        environment_display = "Preview" if is_preview else "Production"  # Use "Preview" or "Production" for display
+        environment = data.get('environment', 'prod')  # 'dev' or 'prod'
+        custom_domain_override = data.get('custom_domain')  # Optional: user's custom domain (e.g., myapp.com)
         
         if not project_name or not subdomain or not files:
             return jsonify({'error': 'Missing required fields: project_name, subdomain, files'}), 400
         
-        # Store original subdomain (without "dev-" prefix) for custom_domain in Production
-        # For Preview: custom_domain will use subdomain (with "dev-" prefix)
-        # For Production: custom_domain will use original_subdomain (without "dev-" prefix)
-        original_subdomain = subdomain.replace("dev-", "", 1) if subdomain.startswith("dev-") else subdomain
-        
         # Ensure subdomain format matches environment:
-        # - Preview: should have "dev-" prefix (e.g., "dev-vibe-123") for project_name
+        # - Dev: should have "dev-" prefix (e.g., "dev-vibe-123")
         # - Prod: should NOT have "dev-" prefix (e.g., "vibe-123")
-        if is_preview:
+        if environment == "dev":
             if not subdomain.startswith("dev-"):
                 # Add "dev-" prefix if missing
+                original_subdomain = subdomain
                 subdomain = f"dev-{subdomain}"
                 print(f"[Pages] Added 'dev-' prefix to subdomain: {original_subdomain} -> {subdomain}")
             # Ensure project_name also has "dev-" prefix for consistency
@@ -1618,6 +1609,7 @@ def deploy_pages():
         else:  # prod
             if subdomain.startswith("dev-"):
                 # Remove "dev-" prefix for prod
+                original_subdomain = subdomain
                 subdomain = subdomain.replace("dev-", "", 1)
                 print(f"[Pages] Removed 'dev-' prefix from subdomain: {original_subdomain} -> {subdomain}")
             # Ensure project_name doesn't have "dev-" prefix for prod
@@ -1655,11 +1647,11 @@ def deploy_pages():
         
         print(f"[Pages] Wrote {len(files)} files")
         
-        # Set environment variables for Wrangler
+        # Set environment variables for Wrangler and DNS creation
         env = os.environ.copy()
         env["CLOUDFLARE_API_TOKEN"] = os.environ.get("CLOUDFLARE_API_TOKEN") or cf_api_token
         env["CLOUDFLARE_ACCOUNT_ID"] = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or cf_account_id
-        # No direct Cloudflare API calls; only Wrangler CLI uses these
+        env["CLOUDFLARE_ZONE_ID"] = os.environ.get("CLOUDFLARE_ZONE_ID") or cf_zone_id or ""
         
         # Create wrangler.toml file for Wrangler CLI authentication
         wrangler_toml_path = os.path.join(temp_dir, "wrangler.toml")
@@ -1752,7 +1744,7 @@ def deploy_pages():
             # Install dependencies
             print(f"[Pages] Running npm install...")
             result = subprocess.run(
-                ["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund", "--prefer-offline"],
+                ["npm", "install", "--legacy-peer-deps"],
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
@@ -1871,12 +1863,12 @@ def deploy_pages():
                                 # Install all missing packages (including ones that might be in package.json but not installed)
                                 print(f"[Pages] Installing missing packages: {missing_packages}", flush=True)
                                 install_result = subprocess.run(
-                                    ["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund", "--prefer-offline"] + missing_packages,
+                                    ["npm", "install", "--legacy-peer-deps"] + missing_packages,
                                     cwd=temp_dir,
                                     capture_output=True,
                                     text=True,
                                     env=env,
-                                    timeout=300  # 5 minutes for npm install (large packages can take time)
+                                    timeout=180
                                 )
                                 if install_result.returncode == 0:
                                     print(f"[Pages] ✅ Installed missing packages: {', '.join(missing_packages)}", flush=True)
@@ -2035,16 +2027,16 @@ def deploy_pages():
                 "duplicate", "conflict", "name is already taken"
             ]):
                 print(f"[Pages] ✅ Cloudflare Pages project already exists: {project_name} (that's OK)")
-                print(f"[Pages] Will deploy to {'preview' if is_preview else 'main'} branch")
+                print(f"[Pages] Will deploy to {'preview' if environment == 'dev' else 'main'} branch")
             else:
                 print(f"[Pages] ⚠️ Project creation failed. See output above.")
                 # Continue anyway - deployment might still work if project exists
         
         # Deploy to Cloudflare Pages using Wrangler with retry logic
-        # For Preview: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
+        # For dev: Creates/updates dev-vibe-*.quillworks.org (Preview Environment, preview branch) - shown in iframe
         # For prod: Creates/updates vibe-*.quillworks.org (Production Environment, main branch) - opened via "View Live App"
-        branch_used = "preview" if is_preview else "main"
-        print(f"[Pages] Deploying to Cloudflare Pages ({environment_display} environment, {branch_used} branch): {project_name}")
+        branch_used = "preview" if environment == "dev" else "main"
+        print(f"[Pages] Deploying to Cloudflare Pages ({environment} environment, {branch_used} branch): {project_name}")
         print(f"[Pages] Custom domain: {subdomain}.quillworks.org")
         max_retries = 3
         retry_delay = 5  # seconds
@@ -2057,11 +2049,11 @@ def deploy_pages():
                 import time
                 time.sleep(retry_delay)
             
-            # Use Cloudflare Pages Preview Environment for Preview, Production for prod
+            # Use Cloudflare Pages Preview Environment for dev, Production for prod
             # Preview deployments: Use "preview" branch (creates preview environment automatically)
             # Production deployments: Use "main" branch (production environment)
-            deployment_branch = "preview" if is_preview else "main"
-            print(f"[Pages] Deploying to {environment_display} environment using branch: {deployment_branch}")
+            deployment_branch = "preview" if environment == "dev" else "main"
+            print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
             
             # NOTE: Authentication handled via CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN env vars
             result = subprocess.run(
@@ -2094,51 +2086,55 @@ def deploy_pages():
                             break
 
                 if deployment_url:
-                    print(f"[Pages] ✅ Deployed successfully to {environment_display} environment: {deployment_url}")
+                    print(f"[Pages] ✅ Deployed successfully to {environment} environment: {deployment_url}")
                     
                     # Extract stable project URL (without deployment hash)
-                    # For Preview: https://preview.{project}.pages.dev (e.g., https://preview.dev-vibe-177ai54uy.pages.dev)
-                    # For Production: https://{project}.pages.dev (e.g., https://vibe-177ai54uy.pages.dev) - no "dev-" prefix
+                    # Preview: https://{hash}.preview.{project}.pages.dev → https://preview.{project}.pages.dev
+                    # Production: https://{hash}.{project}.pages.dev → https://{project}.pages.dev (remove dev- prefix)
                     stable_url = deployment_url
                     if '.pages.dev' in deployment_url:
-                        # Remove deployment hash if present
-                        # Preview format: {hash}.preview.{project}.pages.dev
-                        # Production format: {hash}.{project}.pages.dev
-                        parts = deployment_url.replace('https://', '').split('.')
-                        if len(parts) >= 3:  # Has format: {hash}.{...}.pages.dev
-                            # Check if first part looks like a hash (short alphanumeric)
-                            if len(parts[0]) <= 10 and parts[0].replace('-', '').isalnum():
-                                # Check if second part is "preview" (for Preview environments)
-                                has_preview_subdomain = parts[1] == "preview"
-                                
-                                if has_preview_subdomain:
-                                    # Preview format: {hash}.preview.{project}.pages.dev
-                                    # Get project name (parts[2] is the project name, may include "dev-")
-                                    project_part = parts[2]
-                                    # Reconstruct: preview.{project}.pages.dev
-                                    stable_url = f"https://preview.{project_part}.pages.dev"
-                                    print(f"[Pages] 📌 Stable preview URL (no deployment hash): {stable_url}")
+                        url_without_protocol = deployment_url.replace('https://', '')
+                        parts = url_without_protocol.split('.')
+                        
+                        # Check if this is a preview deployment (has "preview" subdomain)
+                        # Format: {hash}.preview.{project}.pages.dev
+                        if 'preview' in parts and len(parts) >= 4:
+                            # Find the preview subdomain
+                            preview_idx = parts.index('preview')
+                            if preview_idx > 0:  # There's a hash before preview
+                                # Check if first part is a hash (8-10 chars, alphanumeric)
+                                if len(parts[0]) <= 10 and parts[0].replace('-', '').isalnum():
+                                    # Remove hash, keep preview and everything after
+                                    # Example: ['029820d1', 'preview', 'dev-vibe-177ai54uy', 'pages', 'dev']
+                                    # Result: ['preview', 'dev-vibe-177ai54uy', 'pages', 'dev']
+                                    stable_url = f"https://{'.'.join(parts[1:])}"
+                                    print(f"[Pages] 📌 Stable preview URL (no hash): {stable_url}")
+                        else:
+                            # Production deployment: {hash}.{project}.pages.dev
+                            if len(parts) >= 3 and len(parts[0]) <= 10 and parts[0].replace('-', '').isalnum():
+                                # Remove hash
+                                project_with_dev_prefix = '.'.join(parts[1:])
+                                # For production, also remove dev- prefix from project name
+                                # Example: dev-vibe-177ai54uy.pages.dev → vibe-177ai54uy.pages.dev
+                                if environment == "prod" and parts[1].startswith('dev-'):
+                                    # Remove dev- prefix for production stable URL
+                                    project_without_dev = parts[1].replace('dev-', '', 1)
+                                    stable_url = f"https://{project_without_dev}.{'.'.join(parts[2:])}"
+                                    print(f"[Pages] 📌 Stable production URL (no hash, no dev- prefix): {stable_url}")
                                 else:
-                                    # Production format: {hash}.{project}.pages.dev
-                                    # Get project name (parts[1] is the project name, may include "dev-")
-                                    project_part = parts[1]
-                                    # Remove "dev-" prefix for Production environment
-                                    if project_part.startswith("dev-"):
-                                        project_part = project_part.replace("dev-", "", 1)
-                                    # Reconstruct: {project}.pages.dev
-                                    stable_url = f"https://{project_part}.pages.dev"
-                                    print(f"[Pages] 📌 Stable production URL (no deployment hash, no dev- prefix): {stable_url}")
+                                    stable_url = f"https://{project_with_dev_prefix}"
+                                    print(f"[Pages] 📌 Stable project URL (no hash): {stable_url}")
                     
-                    if is_preview:
+                    if environment == "dev":
                         print(f"[Pages] Preview environment created/updated at: {deployment_url}")
                         print(f"[Pages] This is the preview environment (preview branch) - shown in iframe for coding")
                         if stable_url != deployment_url:
                             print(f"[Pages] 💡 Stable preview URL (always points to latest preview): {stable_url}")
-                        print(f"[Pages] ⏳ Note: SSL certificate provisioning may take 1-5 minutes. If you see SSL errors, wait a few minutes and try again.")
                     else:
                         print(f"[Pages] Production environment deployed at: {deployment_url}")
                         print(f"[Pages] This is the production environment (main branch) - opened via 'View Live App'")
-                        print(f"[Pages] ⏳ Note: SSL certificate provisioning may take 1-5 minutes. If you see SSL errors, wait a few minutes and try again.")
+                        if stable_url != deployment_url:
+                            print(f"[Pages] 💡 Stable production URL (always points to latest): {stable_url}")
                 else:
                     print(f"[Pages] ⚠️ Deployment succeeded but couldn't parse deployment URL from output")
                     print(f"[Pages] Full output: {result.stdout[:500]}")
@@ -2166,194 +2162,165 @@ def deploy_pages():
         # deployment_url is now set in the retry loop above
         
         # Add/verify custom domain is attached to the Pages project
-        # For Preview: Use subdomain (with "dev-" prefix) for custom_domain
-        # For Production: Use original_subdomain (without "dev-" prefix) for custom_domain
-        # Preview: dev-vibe-*.quillworks.org (with "dev-" prefix)
-        # Prod: vibe-*.quillworks.org (no "dev-" prefix)
-        custom_domain_subdomain = subdomain if is_preview else original_subdomain
-        custom_domain = f"{custom_domain_subdomain}.quillworks.org"
-        branch_used = "preview" if is_preview else "main"
-        print(f"[Pages] Environment: {environment_display} (branch: {branch_used})")
-        print(f"[Pages] Custom domain: {custom_domain}")
+        # Dev: dev-vibe-*.quillworks.org (Preview Environment, preview branch) - for coding in iframe
+        # Prod: vibe-*.quillworks.org OR user's custom domain (Production Environment, main branch) - for live app
+        if custom_domain_override:
+            # User provided custom domain (e.g., myapp.com)
+            custom_domain = custom_domain_override
+            print(f"[Pages] Using user-provided custom domain: {custom_domain}")
+        else:
+            # Default to .quillworks.org
+            custom_domain = f"{subdomain}.quillworks.org"
+            print(f"[Pages] Using default .quillworks.org domain: {custom_domain}")
+        
+        branch_used = "preview" if environment == "dev" else "main"
+        print(f"[Pages] Environment: {environment} (branch: {branch_used})")
         print(f"[Pages] Deployment URL: {deployment_url}")
-        print(f"[Pages] This {environment_display} deployment will be accessible at {custom_domain}")
+        print(f"[Pages] This {environment} deployment will be accessible at {custom_domain}")
         
         try:
-            # Add custom domain to Pages project using Wrangler CLI ONLY
-            # Wrangler will handle DNS and domain attachment automatically
+            # Step 1: Create DNS CNAME record via Cloudflare API (Wrangler doesn't handle DNS)
+            import requests as req
+            api_token = env.get("CLOUDFLARE_API_TOKEN")
+            zone_id = env.get("CLOUDFLARE_ZONE_ID")
+            
+            # Validate zone_id
+            if zone_id and ('.' in zone_id or len(zone_id) < 20):
+                print(f"[Pages] ⚠️ Warning: zone_id looks invalid (got: {zone_id}). Expected a 32-char zone ID hash.")
+                zone_id = None
+            
+            dns_created = False
+            
+            # Debug: Check if env vars are set
+            print(f"[Pages] DNS Setup - Checking environment variables...")
+            print(f"[Pages] CLOUDFLARE_API_TOKEN present: {bool(api_token)}")
+            print(f"[Pages] CLOUDFLARE_ZONE_ID present: {bool(zone_id)}")
+            if api_token:
+                print(f"[Pages] API Token length: {len(api_token)}")
+            if zone_id:
+                print(f"[Pages] Zone ID length: {len(zone_id)}")
+            
+            if zone_id and api_token:
+                # For preview deployments, use the preview subdomain
+                # Production: project-name.pages.dev
+                # Preview: preview.project-name.pages.dev (stable URL for preview branch)
+                if environment == "dev":
+                    pages_dev_url = f"preview.{project_name}.pages.dev"
+                else:
+                    pages_dev_url = f"{project_name}.pages.dev"
+                print(f"[Pages] Creating DNS CNAME: {custom_domain} → {pages_dev_url}")
+                print(f"[Pages] Environment: {environment}, using {'preview subdomain' if environment == 'dev' else 'production URL'}")
+                
+                try:
+                    # Check if DNS record already exists
+                    check_response = req.get(
+                        f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                        headers={
+                            "Authorization": f"Bearer {api_token}",
+                            "Content-Type": "application/json"
+                        },
+                        params={"name": custom_domain, "type": "CNAME"},
+                        timeout=30
+                    )
+                    
+                    if check_response.status_code == 200:
+                        existing_records = check_response.json().get("result", [])
+                        if existing_records and existing_records[0].get("content") == pages_dev_url:
+                            print(f"[Pages] ✅ DNS CNAME already exists: {custom_domain}")
+                            dns_created = True
+                        elif existing_records:
+                            # Update existing record
+                            record_id = existing_records[0]["id"]
+                            update_response = req.put(
+                                f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+                                headers={
+                                    "Authorization": f"Bearer {api_token}",
+                                    "Content-Type": "application/json"
+                                },
+                                json={
+                                    "type": "CNAME",
+                                    "name": subdomain,
+                                    "content": pages_dev_url,
+                                    "proxied": True
+                                },
+                                timeout=30
+                            )
+                            if update_response.status_code in [200, 201]:
+                                print(f"[Pages] ✅ DNS CNAME updated: {custom_domain}")
+                                dns_created = True
+                    
+                    # Create DNS record if it doesn't exist
+                    if not dns_created:
+                        dns_response = req.post(
+                            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+                            headers={
+                                "Authorization": f"Bearer {api_token}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "type": "CNAME",
+                                "name": subdomain,
+                                "content": pages_dev_url,
+                                "proxied": True,
+                                "ttl": 1
+                            },
+                            timeout=30
+                        )
+                        
+                        if dns_response.status_code in [200, 201]:
+                            print(f"[Pages] ✅ DNS CNAME created: {custom_domain} → {pages_dev_url}")
+                            dns_created = True
+                        else:
+                            dns_result = dns_response.json()
+                            if dns_result.get("errors") and any(e.get("code") == 81057 for e in dns_result.get("errors", [])):
+                                print(f"[Pages] ✅ DNS record already exists")
+                                dns_created = True
+                            else:
+                                print(f"[Pages] ⚠️ DNS creation failed: {dns_response.status_code}")
+                except Exception as dns_err:
+                    print(f"[Pages] ⚠️ DNS creation error: {dns_err}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                if not zone_id:
+                    print(f"[Pages] ⚠️ CLOUDFLARE_ZONE_ID not set - skipping DNS creation")
+                    print(f"[Pages] ⚠️ Set CLOUDFLARE_ZONE_ID environment variable on Railway to enable automatic DNS")
+                if not api_token:
+                    print(f"[Pages] ⚠️ CLOUDFLARE_API_TOKEN not set - skipping DNS creation")
+                    print(f"[Pages] ⚠️ Set CLOUDFLARE_API_TOKEN environment variable on Railway to enable automatic DNS")
+            
+            # Step 2: Add custom domain to Pages project using Wrangler CLI
             print(f"[Pages] Adding custom domain via Wrangler CLI...")
             print(f"[Pages] Custom domain: {custom_domain}")
             print(f"[Pages] Project name: {project_name}")
             
-            # First, verify the Pages project exists before adding domain
-            # This helps prevent Error 1014 (CNAME Cross-User Banned)
-            print(f"[Pages] Verifying Pages project '{project_name}' exists before adding domain...")
+            domain_attached = False
             wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
             
-            verify_result = subprocess.run(
+            print(f"[Pages] Running: wrangler pages domain add {custom_domain} --project-name {project_name}")
+            domain_result = subprocess.run(
                 [
-                    "npx", "--yes", "wrangler@latest", "pages", "project", "list", "--json"
+                    "npx", "--yes", "wrangler@latest", "pages", "domain", "add",
+                    custom_domain,
+                    "--project-name", project_name
                 ],
                 cwd=wrangler_cwd,
                 capture_output=True,
                 text=True,
                 env=env,
-                timeout=30
+                timeout=90
             )
             
-            project_exists = False
-            if verify_result.returncode == 0:
-                try:
-                    projects = json.loads(verify_result.stdout)
-                    project_exists = any(p.get("name") == project_name for p in projects)
-                    if project_exists:
-                        print(f"[Pages] ✅ Verified: Pages project '{project_name}' exists in account")
-                    else:
-                        print(f"[Pages] ⚠️ Warning: Pages project '{project_name}' not found in account")
-                        print(f"[Pages] Available projects: {[p.get('name') for p in projects[:5]]}")
-                        print(f"[Pages] This may cause Error 1014 (CNAME Cross-User Banned) when adding domain")
-                except json.JSONDecodeError:
-                    print(f"[Pages] ⚠️ Could not parse project list, continuing anyway...")
+            if domain_result.returncode == 0:
+                print(f"[Pages] ✅ Custom domain added via Wrangler: {custom_domain}")
+                domain_attached = True
             else:
-                print(f"[Pages] ⚠️ Could not verify project list (exit code {verify_result.returncode}), continuing anyway...")
-            
-            domain_attached = False
-            
-            # Step 1: Create DNS CNAME record via Cloudflare API (if zone_id is provided)
-            dns_record_created = False
-            if cf_zone_id and len(cf_zone_id) == 32 and all(c in '0123456789abcdefABCDEF' for c in cf_zone_id):
-                # Validate zone_id is a 32-character hex string
-                try:
-                    print(f"[Pages] Creating DNS CNAME record for {custom_domain}...")
-                    # Extract subdomain from custom_domain (e.g., "dev-vibe-123.quillworks.org" -> "dev-vibe-123")
-                    subdomain = custom_domain.split('.')[0]
-                    # Target should point to the Pages project's .pages.dev domain
-                    target = f"{project_name}.pages.dev"
-                    
-                    dns_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
-                    dns_headers = {
-                        "Authorization": f"Bearer {cf_api_token or os.environ.get('CLOUDFLARE_API_TOKEN')}",
-                        "Content-Type": "application/json"
-                    }
-                    dns_data = {
-                        "type": "CNAME",
-                        "name": subdomain,  # Just the subdomain part
-                        "content": target,  # Points to project.pages.dev
-                        "ttl": 3600,  # 1 hour TTL
-                        "comment": f"Auto-created for Cloudflare Pages project: {project_name}"
-                    }
-                    
-                    # Check if DNS record already exists
-                    check_dns_url = f"{dns_url}?name={subdomain}&type=CNAME"
-                    check_response = requests.get(check_dns_url, headers=dns_headers, timeout=30)
-                    
-                    if check_response.status_code == 200:
-                        existing_records = check_response.json().get("result", [])
-                        if existing_records:
-                            existing_record = existing_records[0]
-                            if existing_record.get("content") == target:
-                                print(f"[Pages] ✅ DNS CNAME record already exists and points to correct target: {target}")
-                                dns_record_created = True
-                            else:
-                                print(f"[Pages] ⚠️ DNS CNAME record exists but points to different target: {existing_record.get('content')}")
-                                print(f"[Pages] ⚠️ Expected: {target}, Found: {existing_record.get('content')}")
-                                print(f"[Pages] ⚠️ You may need to update the DNS record manually in Cloudflare Dashboard")
-                        else:
-                            # Create new DNS record
-                            create_response = requests.post(dns_url, headers=dns_headers, json=dns_data, timeout=30)
-                            if create_response.status_code in [200, 201]:
-                                print(f"[Pages] ✅ Created DNS CNAME record: {subdomain} -> {target}")
-                                dns_record_created = True
-                            else:
-                                error_data = create_response.json() if create_response.content else {}
-                                error_msg = error_data.get("errors", [{}])[0].get("message", create_response.text)
-                                print(f"[Pages] ⚠️ Failed to create DNS record: {error_msg}")
-                                print(f"[Pages] ⚠️ You may need to create the DNS record manually:")
-                                print(f"[Pages] ⚠️   Type: CNAME")
-                                print(f"[Pages] ⚠️   Name: {subdomain}")
-                                print(f"[Pages] ⚠️   Target: {target}")
-                    else:
-                        print(f"[Pages] ⚠️ Could not check existing DNS records: {check_response.status_code}")
-                        
-                except Exception as dns_err:
-                    print(f"[Pages] ⚠️ Error creating DNS record: {dns_err}")
-                    print(f"[Pages] ⚠️ You may need to create the DNS record manually in Cloudflare Dashboard")
-            elif cf_zone_id:
-                print(f"[Pages] ⚠️ Invalid zone_id format (must be 32-character hex string), skipping DNS creation")
-                print(f"[Pages] ⚠️ You may need to create the DNS record manually:")
-                print(f"[Pages] ⚠️   Type: CNAME")
-                print(f"[Pages] ⚠️   Name: {custom_domain.split('.')[0]}")
-                print(f"[Pages] ⚠️   Target: {project_name}.pages.dev")
-            else:
-                print(f"[Pages] ⚠️ No zone_id provided, skipping DNS record creation")
-                print(f"[Pages] ⚠️ You may need to create the DNS record manually:")
-                print(f"[Pages] ⚠️   Type: CNAME")
-                print(f"[Pages] ⚠️   Name: {custom_domain.split('.')[0]}")
-                print(f"[Pages] ⚠️   Target: {project_name}.pages.dev")
-            
-            # Step 2: Attach domain to Pages project via Cloudflare API
-            print(f"[Pages] Attaching custom domain to Pages project via Cloudflare API: {custom_domain}")
-            print(f"[Pages] Project name: {project_name}")
-            
-            # Get the project ID first
-            project_id = None
-            if project_exists:
-                try:
-                    # List projects to get the project ID
-                    list_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}/pages/projects"
-                    list_headers = {
-                        "Authorization": f"Bearer {cf_api_token or os.environ.get('CLOUDFLARE_API_TOKEN')}",
-                        "Content-Type": "application/json"
-                    }
-                    list_response = requests.get(list_url, headers=list_headers, timeout=30)
-                    if list_response.status_code == 200:
-                        projects_data = list_response.json()
-                        for proj in projects_data.get("result", []):
-                            if proj.get("name") == project_name:
-                                project_id = proj.get("id")
-                                print(f"[Pages] ✅ Found project ID: {project_id}")
-                                break
-                except Exception as api_err:
-                    print(f"[Pages] ⚠️ Could not get project ID via API: {api_err}")
-            
-            # Attach domain using Cloudflare API
-            if project_id:
-                try:
-                    attach_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id or os.environ.get('CLOUDFLARE_ACCOUNT_ID')}/pages/projects/{project_name}/domains"
-                    attach_headers = {
-                        "Authorization": f"Bearer {cf_api_token or os.environ.get('CLOUDFLARE_API_TOKEN')}",
-                        "Content-Type": "application/json"
-                    }
-                    attach_data = {
-                        "domain": custom_domain
-                    }
-                    
-                    attach_response = requests.post(attach_url, headers=attach_headers, json=attach_data, timeout=90)
-                    
-                    if attach_response.status_code in [200, 201]:
-                        print(f"[Pages] ✅ Custom domain attached via Cloudflare API: {custom_domain}")
-                        domain_attached = True
-                    elif attach_response.status_code == 409:
-                        # Domain already exists - this is success
-                        print(f"[Pages] ✅ Custom domain already attached (that's OK)")
-                        domain_attached = True
-                    else:
-                        error_data = attach_response.json() if attach_response.content else {}
-                        error_msg = error_data.get("errors", [{}])[0].get("message", attach_response.text)
-                        error_code = error_data.get("errors", [{}])[0].get("code", attach_response.status_code)
-                        
-                        print(f"[Pages] ⚠️ API domain attachment failed: {error_code} - {error_msg}")
-                        
-                        # Check for Error 1014
-                        if "1014" in str(error_code) or "cname" in error_msg.lower():
-                            print(f"[Pages] ❌ Error 1014: CNAME Cross-User Banned")
-                            print(f"[Pages] Troubleshooting: Check DNS records and ensure project exists in account")
-                except Exception as attach_err:
-                    print(f"[Pages] ⚠️ Exception during API domain attachment: {attach_err}")
-            else:
-                print(f"[Pages] ⚠️ Could not get project ID, skipping automatic domain attachment")
-                print(f"[Pages] ⚠️ You can attach the domain manually in Cloudflare Dashboard:")
-                print(f"[Pages] ⚠️   https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains")
+                error_output = (domain_result.stderr or domain_result.stdout or "").lower()
+                if any(phrase in error_output for phrase in ["already", "already exists", "already configured"]):
+                    print(f"[Pages] ✅ Custom domain already attached (that's OK)")
+                    domain_attached = True
+                else:
+                    print(f"[Pages] ⚠️ Wrangler failed to attach domain: {domain_result.stderr[:500] if domain_result.stderr else domain_result.stdout[:500]}")
             
             if not domain_attached:
                 print(f"[Pages] ⚠️ Could not attach domain automatically, but deployment succeeded")
@@ -2369,22 +2336,22 @@ def deploy_pages():
             traceback.print_exc()
         
         # Return deployment information
-        # For Preview: returns preview.dev-vibe-*.pages.dev URL and dev-vibe-*.quillworks.org custom domain
-        # For Production: returns vibe-*.pages.dev URL and vibe-*.quillworks.org custom domain
-        # deployment_url: The deployment-specific URL with hash (e.g., https://029820d1.preview.dev-vibe-177ai54uy.pages.dev)
-        # stable_url: The project URL without hash (e.g., https://preview.dev-vibe-177ai54uy.pages.dev for Preview, https://vibe-177ai54uy.pages.dev for Production)
-        # live_preview_url: For Preview environments, use deployment_url (specific deployment). For Production, use stable_url.
+        # For dev: returns preview.dev-vibe-*.pages.dev URL (stable preview URL)
+        # For prod: returns vibe-*.pages.dev URL (stable production URL)
+        # url: The stable URL (always points to latest for that branch)
+        # deployment_url: The deployment-specific URL with hash (for this specific deployment)
+        stable_pages_url = stable_url or deployment_url  # Use stable preview URL
+        
         return jsonify({
             "success": True,
-            "url": stable_url or deployment_url,  # Prefer stable URL (without deployment hash) for general use
-            "deployment_url": deployment_url,  # Deployment-specific URL with hash (e.g., https://029820d1.dev-vibe-177ai54uy.pages.dev)
-            "stable_url": stable_url,  # Stable project URL (no hash, always points to latest for that branch)
-            "live_preview_url": deployment_url if is_preview else (stable_url or deployment_url),  # Use deployment URL for Preview live preview (specific deployment), stable for Production
+            "url": stable_pages_url,  # Stable URL (preview.{project}.pages.dev for dev, {project}.pages.dev for prod)
+            "deployment_url": deployment_url,  # Deployment-specific URL with hash
+            "stable_url": stable_url,  # Stable project URL (no hash, always latest)
             "project_name": project_name,
             "custom_domain": custom_domain,  # Custom domain (e.g., dev-vibe-*.quillworks.org or vibe-*.quillworks.org)
-            "environment": environment_display,  # 'Preview' or 'Production'
-            "pages_preview_url": stable_url or deployment_url if is_preview else None,  # Stable Preview URL
-            "pages_prod_url": stable_url or deployment_url if not is_preview else None,  # Stable Production URL
+            "environment": environment,  # 'dev' or 'prod'
+            "pages_dev_url": stable_pages_url if environment == "dev" else None,  # Stable dev preview URL (preview.{project}.pages.dev)
+            "pages_prod_url": stable_pages_url if environment == "prod" else None,  # Stable prod URL ({project}.pages.dev)
             "custom_domain_url": f"https://{custom_domain}"  # Full custom domain URL
         })
         
@@ -2432,154 +2399,45 @@ def attach_domain():
         # Use home directory or temp for Wrangler (doesn't need project files)
         wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
         
-        # First, verify the Pages project exists
-        print(f"[Pages] Verifying Pages project '{project_name}' exists...")
-        verify_result = subprocess.run(
+        # NOTE: wrangler pages domain add doesn't support --account-id
+        # Authentication is handled via CLOUDFLARE_ACCOUNT_ID env var
+        result = subprocess.run(
             [
-                "npx", "--yes", "wrangler@latest", "pages", "project", "list", "--json"
+                "npx", "--yes", "wrangler@latest", "pages", "domain", "add", custom_domain,
+                "--project-name", project_name
             ],
             cwd=wrangler_cwd,
             capture_output=True,
             text=True,
             env=env,
-            timeout=30
+            timeout=90
         )
         
-        project_exists = False
-        if verify_result.returncode == 0:
-            try:
-                projects = json.loads(verify_result.stdout)
-                project_exists = any(p.get("name") == project_name for p in projects)
-                if not project_exists:
-                    print(f"[Pages] ⚠️ Warning: Pages project '{project_name}' not found in account")
-                    print(f"[Pages] Available projects: {[p.get('name') for p in projects]}")
-            except json.JSONDecodeError:
-                print(f"[Pages] ⚠️ Could not parse project list, continuing anyway...")
+        if result.returncode == 0:
+            return jsonify({
+                'success': True,
+                'message': f'Custom domain {custom_domain} attached successfully',
+                'method': 'wrangler',
+                'command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}'
+            })
         else:
-            print(f"[Pages] ⚠️ Could not verify project list, continuing anyway...")
-        
-        # Step 1: Create DNS CNAME record via Cloudflare API (if zone_id is provided)
-        dns_record_created = False
-        if cf_zone_id and len(cf_zone_id) == 32 and all(c in '0123456789abcdefABCDEF' for c in cf_zone_id):
-            # Validate zone_id is a 32-character hex string
-            try:
-                print(f"[Pages] Creating DNS CNAME record for {custom_domain}...")
-                # Extract subdomain from custom_domain (e.g., "dev-vibe-123.quillworks.org" -> "dev-vibe-123")
-                subdomain = custom_domain.split('.')[0]
-                # Target should point to the Pages project's .pages.dev domain
-                target = f"{project_name}.pages.dev"
-                
-                dns_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
-                dns_headers = {
-                    "Authorization": f"Bearer {cf_api_token}",
-                    "Content-Type": "application/json"
-                }
-                dns_data = {
-                    "type": "CNAME",
-                    "name": subdomain,  # Just the subdomain part
-                    "content": target,  # Points to project.pages.dev
-                    "ttl": 3600,  # 1 hour TTL
-                    "comment": f"Auto-created for Cloudflare Pages project: {project_name}"
-                }
-                
-                # Check if DNS record already exists
-                check_dns_url = f"{dns_url}?name={subdomain}&type=CNAME"
-                check_response = requests.get(check_dns_url, headers=dns_headers, timeout=30)
-                
-                if check_response.status_code == 200:
-                    existing_records = check_response.json().get("result", [])
-                    if existing_records:
-                        existing_record = existing_records[0]
-                        if existing_record.get("content") == target:
-                            print(f"[Pages] ✅ DNS CNAME record already exists and points to correct target: {target}")
-                            dns_record_created = True
-                        else:
-                            print(f"[Pages] ⚠️ DNS CNAME record exists but points to different target: {existing_record.get('content')}")
-                            print(f"[Pages] ⚠️ Expected: {target}, Found: {existing_record.get('content')}")
-                    else:
-                        # Create new DNS record
-                        create_response = requests.post(dns_url, headers=dns_headers, json=dns_data, timeout=30)
-                        if create_response.status_code in [200, 201]:
-                            print(f"[Pages] ✅ Created DNS CNAME record: {subdomain} -> {target}")
-                            dns_record_created = True
-                        else:
-                            error_data = create_response.json() if create_response.content else {}
-                            error_msg = error_data.get("errors", [{}])[0].get("message", create_response.text)
-                            print(f"[Pages] ⚠️ Failed to create DNS record: {error_msg}")
-                else:
-                    print(f"[Pages] ⚠️ Could not check existing DNS records: {check_response.status_code}")
-                    
-            except Exception as dns_err:
-                print(f"[Pages] ⚠️ Error creating DNS record: {dns_err}")
-        elif cf_zone_id:
-            print(f"[Pages] ⚠️ Invalid zone_id format (must be 32-character hex string), skipping DNS creation")
-        else:
-            print(f"[Pages] ⚠️ No zone_id provided, skipping DNS record creation")
-        
-        # Step 2: Attach domain to Pages project via Cloudflare API
-        attach_url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/pages/projects/{project_name}/domains"
-        attach_headers = {
-            "Authorization": f"Bearer {cf_api_token}",
-            "Content-Type": "application/json"
-        }
-        attach_data = {
-            "domain": custom_domain
-        }
-        
-        try:
-            attach_response = requests.post(attach_url, headers=attach_headers, json=attach_data, timeout=90)
-            
-            if attach_response.status_code in [200, 201]:
-                return jsonify({
-                    'success': True,
-                    'message': f'Custom domain {custom_domain} attached successfully',
-                    'method': 'cloudflare_api'
-                })
-            elif attach_response.status_code == 409:
-                # Domain already exists - this is success
+            error_output = (result.stderr or result.stdout or "").lower()
+            if any(phrase in error_output for phrase in ["already", "already exists", "already configured", "is already"]):
                 return jsonify({
                     'success': True,
                     'message': f'Custom domain {custom_domain} already attached',
-                    'method': 'cloudflare_api'
+                    'method': 'wrangler'
                 })
             else:
-                error_data = attach_response.json() if attach_response.content else {}
-                error_msg = error_data.get("errors", [{}])[0].get("message", attach_response.text)
-                error_code = error_data.get("errors", [{}])[0].get("code", attach_response.status_code)
-                
-                # Check for Error 1014
-                if "1014" in str(error_code) or "cname" in error_msg.lower():
-                    return jsonify({
-                        'success': False,
-                        'error': 'Error 1014: CNAME Cross-User Banned',
-                        'error_code': '1014',
-                        'explanation': 'This error occurs when the DNS CNAME record conflicts with an existing record, or the Pages project doesn\'t exist in the current Cloudflare account',
-                        'troubleshooting': [
-                            f"Verify the Pages project '{project_name}' exists in your Cloudflare account",
-                            f"Check Cloudflare DNS for existing CNAME records for {custom_domain}",
-                            "Remove any conflicting DNS records in Cloudflare Dashboard",
-                            "Wait a few minutes for DNS to propagate, then try again",
-                            f"Or manually add the domain: https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains"
-                        ],
-                        'api_error': error_msg,
-                        'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
-                        'project_exists': project_exists
-                    }), 500
-                else:
-                    return jsonify({
-                        'success': False,
-                        'error': f'Cloudflare API failed to attach domain',
-                        'error_code': error_code,
-                        'api_error': error_msg,
-                        'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains',
-                        'project_exists': project_exists
-                    }), 500
-        except Exception as e:
-            return jsonify({
-                'success': False,
-                'error': f'Exception during API domain attachment: {str(e)}',
-                'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains'
-            }), 500
+                # Return detailed error with command to run manually
+                full_error = (result.stderr or result.stdout or "")[:1000]
+                return jsonify({
+                    'success': False,
+                    'error': f'Wrangler failed to attach domain',
+                    'wrangler_error': full_error,
+                    'manual_command': f'npx wrangler pages domain add {custom_domain} --project-name {project_name}',
+                    'dashboard_url': f'https://dash.cloudflare.com -> Pages -> {project_name} -> Custom domains'
+                }), 500
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
