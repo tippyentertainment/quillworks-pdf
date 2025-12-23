@@ -1778,14 +1778,14 @@ def deploy_pages():
                 if build_retry_count > 0:
                     print(f"[Pages] Retrying build (attempt {build_retry_count + 1}/{max_build_retries + 1})...", flush=True)
                 
-            result = subprocess.run(
-                ["npm", "run", "build"],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=300
-            )
+                result = subprocess.run(
+                    ["npm", "run", "build"],
+                    cwd=temp_dir,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=300
+                )
                 
                 if result.returncode == 0:
                     print(f"[Pages] ✅ Build completed successfully", flush=True)
@@ -2056,26 +2056,26 @@ def deploy_pages():
             print(f"[Pages] Deploying to {environment} environment using branch: {deployment_branch}")
             
             # NOTE: Authentication handled via CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN env vars
-        result = subprocess.run(
-            [
-                "npx", "wrangler", "pages", "deploy", build_path,
-                "--project-name", project_name,
+            result = subprocess.run(
+                [
+                    "npx", "wrangler", "pages", "deploy", build_path,
+                    "--project-name", project_name,
                     "--branch", deployment_branch,
-                "--commit-dirty=true"
-            ],
-            cwd=temp_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=300
-        )
+                    "--commit-dirty=true"
+                ],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=300
+            )
         
             if result.returncode == 0:
                 # Success - parse deployment URL
                 # Wrangler returns: "✨ Deployment complete! Visit: https://0da3x230.dev-vibe-176mvke.pages.dev"
                 # Extract the full URL including any deployment hash
-        for line in result.stdout.split('\n'):
-            if 'https://' in line and '.pages.dev' in line:
+                for line in result.stdout.split('\n'):
+                    if 'https://' in line and '.pages.dev' in line:
                         # Extract URL from line (handles various formats)
                         url_start = line.find('https://')
                         if url_start >= 0:
@@ -2083,7 +2083,7 @@ def deploy_pages():
                             if url_end == -1:
                                 url_end = len(line)
                             deployment_url = line[url_start:url_end].strip()
-                break
+                            break
         
                 if deployment_url:
                     print(f"[Pages] ✅ Deployed successfully to {environment} environment: {deployment_url}")
@@ -2177,7 +2177,7 @@ def deploy_pages():
                 print(f"[Pages] Using user-provided custom domain: {custom_domain}")
             else:
                 # Default to .quillworks.org for production
-        custom_domain = f"{subdomain}.quillworks.org"
+                custom_domain = f"{subdomain}.quillworks.org"
                 print(f"[Pages] Using default .quillworks.org domain: {custom_domain}")
         else:
             # Preview environment - no custom domain needed
@@ -2316,16 +2316,16 @@ def deploy_pages():
                 wrangler_cwd = os.path.expanduser("~") if os.path.exists(os.path.expanduser("~")) else temp_dir
                 
                 print(f"[Pages] Running: wrangler pages domain add {custom_domain} --project-name {project_name}")
-            domain_result = subprocess.run(
-                [
+                domain_result = subprocess.run(
+                    [
                         "npx", "--yes", "wrangler@latest", "pages", "domain", "add",
                         custom_domain,
                         "--project-name", project_name
-                ],
+                    ],
                     cwd=wrangler_cwd,
-                capture_output=True,
-                text=True,
-                env=env,
+                    capture_output=True,
+                    text=True,
+                    env=env,
                     timeout=90
                 )
                 
@@ -2955,10 +2955,10 @@ To enable PHP support, add to your Railway service:
             if os.path.exists(artisan_path):
                 cmd = ['php', 'artisan', 'serve', '--host=0.0.0.0', f'--port={port}']
                 cwd = temp_dir
-                else:
+            else:
                 cmd = ['php', '-S', f'0.0.0.0:{port}', '-t', 'public']
                 cwd = temp_dir
-            else:
+        else:
             # Vanilla PHP - use built-in server
             cmd = ['php', '-S', f'0.0.0.0:{port}']
             cwd = temp_dir
