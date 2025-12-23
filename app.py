@@ -2109,6 +2109,11 @@ def deploy_pages():
                                     # Result: ['preview', 'dev-vibe-177ai54uy', 'pages', 'dev']
                                     stable_url = f"https://{'.'.join(parts[1:])}"
                                     print(f"[Pages] 📌 Stable preview URL (no hash): {stable_url}")
+                                else:
+                                    # Preview deployment but hash format unexpected - construct manually
+                                    if environment == "dev":
+                                        stable_url = f"https://preview.{project_name}.pages.dev"
+                                        print(f"[Pages] 📌 Constructed preview URL (hash format unexpected): {stable_url}")
                         else:
                             # Production deployment: {hash}.{project}.pages.dev
                             if len(parts) >= 3 and len(parts[0]) <= 10 and parts[0].replace('-', '').isalnum():
@@ -2124,6 +2129,10 @@ def deploy_pages():
                                 else:
                                     stable_url = f"https://{project_with_dev_prefix}"
                                     print(f"[Pages] 📌 Stable project URL (no hash): {stable_url}")
+                            elif environment == "dev":
+                                # Dev environment but URL doesn't match expected format - construct preview URL
+                                stable_url = f"https://preview.{project_name}.pages.dev"
+                                print(f"[Pages] 📌 Constructed preview URL (URL format unexpected): {stable_url}")
                     
                     if environment == "dev":
                         print(f"[Pages] Preview environment created/updated at: {deployment_url}")
@@ -2361,6 +2370,16 @@ def deploy_pages():
         # Preview (dev): preview.dev-vibe-*.pages.dev - no custom domain needed
         # Production (prod): vibe-*.pages.dev OR custom domain (e.g., myapp.com)
         stable_pages_url = stable_url or deployment_url
+        
+        # For dev environment, ensure preview URL always has "preview." prefix
+        # If stable_url parsing failed or doesn't have preview prefix, construct it manually
+        if environment == "dev":
+            if not stable_pages_url or "preview." not in stable_pages_url:
+                # Construct preview URL manually: preview.{project_name}.pages.dev
+                preview_url = f"https://preview.{project_name}.pages.dev"
+                print(f"[Pages] ⚠️ Stable URL missing preview prefix, using constructed URL: {preview_url}")
+                stable_pages_url = preview_url
+                stable_url = preview_url  # Update stable_url for consistency
         
         return jsonify({
             "success": True,
