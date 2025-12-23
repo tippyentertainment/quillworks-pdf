@@ -2126,7 +2126,12 @@ def deploy_pages():
                                     project_without_dev = parts[1].replace('dev-', '', 1)
                                     stable_url = f"https://{project_without_dev}.{'.'.join(parts[2:])}"
                                     print(f"[Pages] 📌 Stable production URL (no hash, no dev- prefix): {stable_url}")
+                                elif environment == "dev":
+                                    # Dev environment but URL doesn't have preview subdomain - construct preview URL
+                                    stable_url = f"https://preview.{project_name}.pages.dev"
+                                    print(f"[Pages] 📌 Constructed preview URL (missing preview subdomain): {stable_url}")
                                 else:
+                                    # Production environment, no dev- prefix to remove
                                     stable_url = f"https://{project_with_dev_prefix}"
                                     print(f"[Pages] 📌 Stable project URL (no hash): {stable_url}")
                             elif environment == "dev":
@@ -2371,13 +2376,15 @@ def deploy_pages():
         # Production (prod): vibe-*.pages.dev OR custom domain (e.g., myapp.com)
         stable_pages_url = stable_url or deployment_url
         
-        # For dev environment, ensure preview URL always has "preview." prefix
-        # If stable_url parsing failed or doesn't have preview prefix, construct it manually
+        # Final safety check for dev environment (should rarely trigger since we handle it in parsing above)
+        # Only log if we actually need to correct something that shouldn't have happened
         if environment == "dev":
             if not stable_pages_url or "preview." not in stable_pages_url:
                 # Construct preview URL manually: preview.{project_name}.pages.dev
                 preview_url = f"https://preview.{project_name}.pages.dev"
-                print(f"[Pages] ⚠️ Stable URL missing preview prefix, using constructed URL: {preview_url}")
+                # Only log if this is actually correcting an error (not if stable_url was never set)
+                if stable_url and stable_url != deployment_url:
+                    print(f"[Pages] ⚠️ Warning: Stable URL missing preview prefix, correcting to: {preview_url}")
                 stable_pages_url = preview_url
                 stable_url = preview_url  # Update stable_url for consistency
         
