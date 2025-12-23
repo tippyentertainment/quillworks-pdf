@@ -208,7 +208,7 @@ def generate_nano_banana_design(prompt: str, width=1920, height=1080) -> Image.I
         "output_format": "png",
         "enable_base64_output": False,
         "enable_sync_mode": False,
-        "resolution": "2k",  # Changed from "4k" to match API docs
+        "resolution": "4k",  # API only accepts "4k" or "8k"
     }
     
     # Initiate generation
