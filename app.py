@@ -114,7 +114,23 @@ try:
         mark_selected,
         apply_to_project,
         BASE_DIR,
+        attach_cloudflare_domain,
     )
+
+    # Endpoint to automate Cloudflare domain attachment
+    @app.route('/cloudflare/attach-domain', methods=['POST'])
+    def cloudflare_attach_domain():
+        """Attach a domain to a Cloudflare Pages project using Wrangler CLI."""
+        data = request.json
+        project_name = data.get('project_name')
+        domain = data.get('domain')
+        if not project_name or not domain:
+            return jsonify({'error': 'project_name and domain are required'}), 400
+        try:
+            attach_cloudflare_domain(project_name, domain)
+            return jsonify({'ok': True, 'message': f'Domain {domain} attached to project {project_name}.'})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
     # Check if ATLASCLOUD_API_KEY is set
     if os.environ.get("ATLASCLOUD_API_KEY"):
         DESIGN_SERVICE_AVAILABLE = True

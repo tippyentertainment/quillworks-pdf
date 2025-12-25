@@ -40,7 +40,28 @@ SRC_THEME_DIR.mkdir(parents=True, exist_ok=True)
 PUBLIC_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+
 # ---------- ATLASCLOUD HELPERS ----------
+import subprocess
+
+def attach_cloudflare_domain(project_name: str, domain: str) -> None:
+    """
+    Automate 'wrangler pages domains add' for Cloudflare Pages.
+    Requires Wrangler CLI installed and authenticated.
+    """
+    try:
+        result = subprocess.run(
+            ["wrangler", "pages", "domains", "add", project_name, domain],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        print(f"Domain attached successfully:\n{result.stdout}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to attach domain:\n{e.stderr}")
+        raise
+# Example usage (uncomment to use):
+# attach_cloudflare_domain("vibe-1817o2j", "quillworks.org")
 
 def atlas_generate_image(model: str, payload: Dict[str, Any], retry_count: int = 0, max_retries: int = 2) -> Dict[str, Any]:
     """
