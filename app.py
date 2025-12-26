@@ -104,6 +104,8 @@ except ImportError:
     EPUB_AVAILABLE = False
     print("WARNING: EPUB generation not available")
 
+app = Flask(__name__)
+
 try:
     from design_service import (
         generate_nano_banana_design,
@@ -140,8 +142,6 @@ try:
 except ImportError as e:
     DESIGN_SERVICE_AVAILABLE = False
     print(f"WARNING: Design service not available: {e}")
-
-app = Flask(__name__)
 
 # Add CORS headers for design service endpoints
 @app.after_request
