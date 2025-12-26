@@ -104,7 +104,33 @@ except ImportError:
     EPUB_AVAILABLE = False
     print("WARNING: EPUB generation not available")
 
+
 app = Flask(__name__)
+
+# --- Lyrics extraction endpoint (Flask version) ---
+from flask import request as flask_request
+
+@app.route('/extract-lyrics', methods=['POST'])
+def extract_lyrics():
+    data = flask_request.get_json(force=True)
+    audio_key = data.get('audio_key')
+    if not audio_key:
+        return jsonify({'detail': 'Missing audio_key'}), 400
+
+    text = "This is a placeholder lyric\nSinging along to the beat"
+    lines = [
+        {"text": "This is a placeholder lyric", "start": 0.0, "end": 4.0},
+        {"text": "Singing along to the beat", "start": 4.0, "end": 8.0},
+    ]
+
+    words = []
+    for ln in lines:
+        words_in_line = ln["text"].split()
+        dur = (ln["end"] - ln["start"]) / max(1, len(words_in_line))
+        for i, w in enumerate(words_in_line):
+            words.append({"word": w, "start": ln["start"] + i * dur, "end": ln["start"] + (i + 1) * dur})
+
+    return jsonify({"text": text, "lines": lines, "words": words})
 
 try:
     from design_service import (
